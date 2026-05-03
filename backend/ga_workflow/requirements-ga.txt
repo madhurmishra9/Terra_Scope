@@ -1,0 +1,14 @@
+# ============================================================
+#  TerraScope — GA Workflow additional dependencies
+#  Install with: pip install -r requirements-ga.txt
+#  (after installing base requirements.txt)
+# ============================================================
+
+# Async HTTP — Terraform Registry API + GitHub API calls
+httpx>=0.26.0
+
+# OpenAI-compatible client — talks to Ollama /v1 endpoint
+openai>=1.10.0
+
+# GitHub REST API — PR create/update/list/label/assign
+PyGithub>=2.1.1
