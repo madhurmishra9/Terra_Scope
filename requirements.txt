@@ -1,0 +1,32 @@
+# TerraScope Backend Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Core Agent Framework ──────────────────────────────────────
+pydantic-ai>=0.0.14
+pydantic>=2.5.0
+
+# ── API Server ────────────────────────────────────────────────
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+httpx>=0.26.0
+python-multipart>=0.0.7
+
+# ── LLM / Embeddings ─────────────────────────────────────────
+openai>=1.10.0          # PydanticAI uses OpenAI-compatible API for Ollama
+
+# ── Vector Store ──────────────────────────────────────────────
+chromadb>=0.4.22
+
+# ── Git Operations ────────────────────────────────────────────
+gitpython>=3.1.40
+
+# ── HCL / Terraform Parsing ───────────────────────────────────
+python-hcl2>=4.3.2
+
+# ── Config ────────────────────────────────────────────────────
+pyyaml>=6.0.1
+pydantic-settings>=2.1.0
+
+# ── Utilities ─────────────────────────────────────────────────
+tenacity>=8.2.3          # Retry logic for Ollama calls
+rich>=13.7.0             # Pretty CLI output for indexer

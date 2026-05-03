@@ -1,0 +1,140 @@
+# ============================================================
+#  TerraScope Configuration
+#  Edit this file to add/remove Terraform module repos.
+#  All paths support Windows (C:\...) and Mac/Linux (/home/...)
+# ============================================================
+
+terrascope:
+  # ── LLM Settings ──────────────────────────────────────────
+  llm:
+    provider: ollama                  # ollama | lm_studio
+    base_url: http://localhost:11434  # Ollama default
+    model: gemma3:4b                  # Local model name
+    embedding_model: nomic-embed-text # Local embedding model
+    temperature: 0.0                  # 0.0 = fully deterministic, fact-only
+    max_tokens: 2048
+    context_window: 8192
+
+  # ── Anti-Hallucination Settings ────────────────────────────
+  grounding:
+    mode: strict                      # strict | balanced
+    # strict: ONLY answer from indexed repo code. No LLM general knowledge.
+    # balanced: Prefer repo code, supplement with LLM knowledge if needed.
+    require_source_citation: true     # Every claim must cite a file+line
+    min_confidence_threshold: 0.65   # Below this → "I don't know" response
+    max_retrieval_chunks: 8          # Top-K chunks to retrieve per query
+    chunk_overlap_tokens: 50         # Overlap between adjacent chunks
+
+  # ── Vector Store ───────────────────────────────────────────
+  vector_store:
+    type: chromadb
+    persist_path: ./data/chromadb     # Relative to terrascope root
+
+  # ── Server Settings ────────────────────────────────────────
+  server:
+    host: 127.0.0.1
+    port: 8000
+    reload: true                      # Auto-reload on code changes
+
+  # ── UI Settings ────────────────────────────────────────────
+  ui:
+    port: 5173
+    theme: dark
+
+# ============================================================
+#  REPOS — Add your Terraform module repos here.
+#  Each entry is one product / module group.
+# ============================================================
+repos:
+  # ── Example: BigQuery module ──────────────────────────────
+  - name: terraform-google-bigquery
+    display_name: BigQuery
+    local_path: ./repos/terraform-google-bigquery   # relative OR absolute
+    # Windows example: C:\Users\you\repos\terraform-google-bigquery
+    # Mac example:     /Users/you/repos/terraform-google-bigquery
+    gcp_product: bigquery
+    description: "Terraform modules for Google BigQuery datasets, tables, IAM"
+    enabled: true
+
+  # ── Example: GCS (Cloud Storage) ─────────────────────────
+  - name: terraform-google-gcs
+    display_name: Cloud Storage
+    local_path: ./repos/terraform-google-gcs
+    gcp_product: storage
+    description: "Terraform modules for Google Cloud Storage buckets"
+    enabled: true
+
+  # ── Example: Dataflow ─────────────────────────────────────
+  - name: terraform-google-dataflow
+    display_name: Dataflow
+    local_path: ./repos/terraform-google-dataflow
+    gcp_product: dataflow
+    description: "Terraform modules for Google Dataflow pipelines"
+    enabled: true
+
+  # ── Add more repos below — just copy a block above ────────
+  # - name: terraform-google-pubsub
+  #   display_name: Pub/Sub
+  #   local_path: ./repos/terraform-google-pubsub
+  #   gcp_product: pubsub
+  #   description: "Terraform modules for Google Cloud Pub/Sub"
+  #   enabled: true
+
+  # - name: terraform-google-dataproc
+  #   display_name: Dataproc
+  #   local_path: ./repos/terraform-google-dataproc
+  #   gcp_product: dataproc
+  #   description: "Terraform modules for Google Dataproc clusters"
+  #   enabled: true
+
+  # - name: terraform-google-composer
+  #   display_name: Cloud Composer
+  #   local_path: ./repos/terraform-google-composer
+  #   gcp_product: composer
+  #   description: "Terraform modules for Google Cloud Composer (Airflow)"
+  #   enabled: true
+
+# ============================================================
+#  GCP Product Knowledge — helps the agent understand context
+#  for each product without hallucinating.
+# ============================================================
+gcp_products:
+  bigquery:
+    apis: [bigquery.googleapis.com, bigqueryconnection.googleapis.com]
+    common_roles: [roles/bigquery.admin, roles/bigquery.dataEditor, roles/bigquery.dataViewer]
+    provider_resources: [google_bigquery_dataset, google_bigquery_table, google_bigquery_iam_binding]
+
+  storage:
+    apis: [storage.googleapis.com]
+    common_roles: [roles/storage.admin, roles/storage.objectAdmin, roles/storage.objectViewer]
+    provider_resources: [google_storage_bucket, google_storage_bucket_iam_binding, google_storage_bucket_object]
+
+  dataflow:
+    apis: [dataflow.googleapis.com, storage.googleapis.com]
+    common_roles: [roles/dataflow.admin, roles/dataflow.worker]
+    provider_resources: [google_dataflow_job, google_dataflow_flex_template_job]
+
+  pubsub:
+    apis: [pubsub.googleapis.com]
+    common_roles: [roles/pubsub.admin, roles/pubsub.publisher, roles/pubsub.subscriber]
+    provider_resources: [google_pubsub_topic, google_pubsub_subscription, google_pubsub_topic_iam_binding]
+
+  dataproc:
+    apis: [dataproc.googleapis.com]
+    common_roles: [roles/dataproc.admin, roles/dataproc.worker]
+    provider_resources: [google_dataproc_cluster, google_dataproc_job, google_dataproc_autoscaling_policy]
+
+  composer:
+    apis: [composer.googleapis.com]
+    common_roles: [roles/composer.admin, roles/composer.worker]
+    provider_resources: [google_composer_environment]
+
+  spanner:
+    apis: [spanner.googleapis.com]
+    common_roles: [roles/spanner.admin, roles/spanner.databaseAdmin]
+    provider_resources: [google_spanner_instance, google_spanner_database, google_spanner_database_iam_binding]
+
+  bigtable:
+    apis: [bigtable.googleapis.com, bigtableadmin.googleapis.com]
+    common_roles: [roles/bigtable.admin, roles/bigtable.reader]
+    provider_resources: [google_bigtable_instance, google_bigtable_table, google_bigtable_instance_iam_binding]
