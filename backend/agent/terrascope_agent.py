@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Optional
 
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel  # Ollama uses OpenAI-compatible API
+from pydantic_ai.models.openai import OpenAIChatModel  # Ollama uses OpenAI-compatible API
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from backend.config import get_config
 from backend.agent.models import (
@@ -87,15 +88,15 @@ def build_agent() -> Agent:
     cfg = get_config()
 
     # Ollama uses OpenAI-compatible API at /v1
-    model = OpenAIModel(
-        model_name=cfg.llm.model,
+    provider = OpenAIProvider(
         base_url=cfg.llm.base_url.rstrip("/") + "/v1",
         api_key="ollama",  # Ollama doesn't require a real key
     )
+    model = OpenAIChatModel(model_name=cfg.llm.model, provider=provider)
 
     agent = Agent(
         model=model,
-        result_type=AgentResponse,
+        output_type=AgentResponse,
         system_prompt=_build_system_prompt(strict=True),
     )
     return agent

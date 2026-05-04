@@ -32,7 +32,7 @@ _indexing_jobs: dict[str, str] = {}   # repo_name → "indexing" | "done" | "err
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = get_config()
-    print("\n🔭 TerraScope API starting...")
+    print("\nTerraScope API starting...")
     print(f"   LLM: {cfg.llm.model} via {cfg.llm.base_url}")
     print(f"   Repos: {[r.name for r in cfg.enabled_repos]}")
     print(f"   Grounding: {cfg.grounding.mode}")
@@ -109,9 +109,10 @@ async def list_repos():
 @app.get("/api/repos/{repo_name}/tags")
 async def get_tags(repo_name: str):
     """List all Git tags for a specific repo."""
-    tags = list_tags_for_repo(repo_name)
-    if tags is None:
+    cfg = get_config()
+    if not cfg.get_repo(repo_name):
         raise HTTPException(404, f"Repo '{repo_name}' not found")
+    tags = list_tags_for_repo(repo_name)
     indexed = get_indexed_tags(repo_name)
     return {
         "repo_name": repo_name,

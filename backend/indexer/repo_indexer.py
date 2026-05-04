@@ -116,7 +116,7 @@ def chunk_repo_at_tag(repo_name: str, tag: str) -> list[dict]:
     tf_files = list_tf_files_at_tag(repo_name, tag)
 
     if not tf_files:
-        print(f"  ⚠  No .tf files found at {tag}")
+        print(f"  [WARN]  No .tf files found at {tag}")
         return []
 
     for file_path in tf_files:
@@ -138,14 +138,14 @@ def index_tag(repo_name: str, tag: str, force: bool = False) -> int:
     """
     if is_indexed(repo_name, tag) and not force:
         count = get_chunk_count(repo_name, tag)
-        print(f"  ✓ {repo_name}@{tag} already indexed ({count} chunks). Skipping.")
+        print(f"  [OK] {repo_name}@{tag} already indexed ({count} chunks). Skipping.")
         return count
 
-    print(f"  → Indexing {repo_name}@{tag}...")
+    print(f"  [..] Indexing {repo_name}@{tag}...")
     chunks = chunk_repo_at_tag(repo_name, tag)
 
     if not chunks:
-        print(f"  ⚠  No chunks produced for {repo_name}@{tag}")
+        print(f"  [WARN]  No chunks produced for {repo_name}@{tag}")
         return 0
 
     client = get_chroma_client()
@@ -184,9 +184,9 @@ def index_tag(repo_name: str, tag: str, force: bool = False) -> int:
             for c in batch
         ]
         collection.upsert(ids=ids, documents=docs, metadatas=metadatas)
-        print(f"     Batch {batch_start // BATCH_SIZE + 1}: {len(batch)} chunks ✓")
+        print(f"     Batch {batch_start // BATCH_SIZE + 1}: {len(batch)} chunks done")
 
-    print(f"  ✅ {repo_name}@{tag}: {len(chunks)} chunks indexed → collection '{col_name}'")
+    print(f"  [DONE] {repo_name}@{tag}: {len(chunks)} chunks indexed -> collection '{col_name}'")
     return len(chunks)
 
 
@@ -201,7 +201,7 @@ def index_repo(repo_name: str, force: bool = False, tags_limit: int = 0) -> dict
 
     tags = list_tags_for_repo(repo_name)
     if not tags:
-        print(f"  ⚠  No Git tags found for '{repo_name}'.")
+        print(f"  [WARN]  No Git tags found for '{repo_name}'.")
         print(f"     Ensure the repo is cloned and has at least one tag.")
         return {"repo": repo_name, "tags": [], "total_chunks": 0, "status": "no_tags"}
 
@@ -218,7 +218,7 @@ def index_repo(repo_name: str, force: bool = False, tags_limit: int = 0) -> dict
             total_chunks += n
             indexed_tags.append(tag)
         except Exception as e:
-            print(f"  ✗ Error indexing {repo_name}@{tag}: {e}")
+            print(f"  [ERR] Error indexing {repo_name}@{tag}: {e}")
 
     return {
         "repo": repo_name,
@@ -251,17 +251,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     start = time.time()
-    print("\n🔭 TerraScope Indexer")
+    print("\nTerraScope Indexer")
     print(f"   Config: terrascope.config.yaml")
     print(f"   Force:  {args.force}")
 
     if args.repo:
         result = index_repo(args.repo, force=args.force, tags_limit=args.tags_limit)
-        print(f"\n✅ Done: {result}")
+        print(f"\n[DONE] {result}")
     else:
         results = index_all(force=args.force)
         total = sum(r.get("total_chunks", 0) for r in results)
-        print(f"\n✅ All repos indexed. Total chunks: {total}")
+        print(f"\n[DONE] All repos indexed. Total chunks: {total}")
 
     elapsed = time.time() - start
     print(f"   Time: {elapsed:.1f}s")

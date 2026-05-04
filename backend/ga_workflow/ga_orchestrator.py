@@ -464,7 +464,7 @@ Examples:
         )
 
         print(f"\n{'='*56}")
-        print(f"🚀 TerraScope GA Workflow")
+        print(f"TerraScope GA Workflow")
         print(f"   Repo:     {repo_name}")
         print(f"   Dry-run:  {args.dry_run}")
         print(f"   Auto-fix: {auto_fix}")
