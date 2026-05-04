@@ -16,7 +16,7 @@ from backend.agent.models import QueryRequest
 
 def _get_repo(repo_cfg: RepoConfig) -> Repo:
     path = repo_cfg.resolved_local_path(
-        Path(__file__).parent.parent.parent
+        Path(__file__).parent.parent.parent.parent
     )
     if not path.exists():
         raise FileNotFoundError(f"Repo path not found: {path}")

@@ -151,7 +151,7 @@ def load_config(path: Path = CONFIG_FILE) -> TerrascopeConfig:
     for repo in config.enabled_repos:
         resolved = repo.resolved_local_path(base)
         if not resolved.exists():
-            print(f"  ⚠  Repo '{repo.name}' not found at: {resolved}")
+            print(f"  [WARN]  Repo '{repo.name}' not found at: {resolved}")
             print(f"     Clone it first or disable it in terrascope.config.yaml")
 
     return config
