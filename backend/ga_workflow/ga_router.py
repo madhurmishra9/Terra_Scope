@@ -38,6 +38,7 @@ from backend.ga_workflow.ga_orchestrator import (
     list_runs,
     delete_run,
 )
+from backend.ga_workflow.gcp_service_detector import scan_gcp_service_features
 from backend.ga_workflow.ga_detector import (
     detect_ga_release,
     fetch_provider_changelog,
@@ -45,6 +46,7 @@ from backend.ga_workflow.ga_detector import (
 )
 from backend.ga_workflow.ga_validators import validate_all
 from backend.ga_workflow.ga_compat import check_provider_compatibility
+from backend.ga_workflow.gcp_service_scanner import scan_gcp_service, GCP_PRODUCT_API_MAP
 from backend.agent.tools.git_tools import get_latest_tag, list_tags_for_repo
 
 
@@ -356,4 +358,130 @@ async def check_compat(
             for c in compat.checks
         ],
         "versions_tf_update": compat.versions_tf_update,
+    }
+
+
+# ── GET /service-scan/{repo_name} ─────────────────────────────────────────────
+
+@ga_router.get("/service-scan/{repo_name}")
+async def scan_service(
+    repo_name: str,
+    days_back: int = Query(default=180, ge=7, le=365),
+) -> dict:
+    """
+    Scan Google Cloud release notes and API Discovery for new GA features
+    for the GCP service/product associated with this repo.
+
+    This is independent of Terraform provider version — it checks what
+    Google Cloud itself has announced as GA for the service.
+
+    Args:
+        days_back: How many days of release notes to scan (default 180 = 6 months)
+    """
+    cfg = get_config()
+    repo_cfg = cfg.get_repo(repo_name)
+    if not repo_cfg:
+        raise HTTPException(status_code=404, detail=f"Repo '{repo_name}' not configured.")
+
+    run = WorkflowRun(run_id="_service_scan", repo_name=repo_name, gcp_product=repo_cfg.gcp_product)
+
+    scan = await scan_gcp_service_features(repo_name=repo_name, run=run, days_back=days_back)
+    if scan is None:
+        raise HTTPException(status_code=502, detail="GCP service scan failed. Check logs.")
+
+    return scan.to_dict()
+
+
+# ── GET /scan/{repo_name} ─────────────────────────────────────────────────────
+
+@ga_router.get("/scan/{repo_name}")
+async def scan_gcp_service_endpoint(
+    repo_name: str,
+    force: bool = Query(default=False, description="Re-scan even if cached"),
+) -> dict:
+    """
+    Scan the GCP service/product associated with this repo for new GA features
+    that are not yet reflected in the Terraform module code.
+
+    Queries:
+      - Google Cloud Release Notes feed for the product
+      - Google API Discovery Service schema
+      - Local LLM to map GCP features to Terraform impact
+
+    Returns a GCPServiceScanResult with all detected features and
+    actionable_features (those not yet in the module).
+    """
+    cfg = get_config()
+    repo_cfg = cfg.get_repo(repo_name)
+    if not repo_cfg:
+        raise HTTPException(status_code=404, detail=f"Repo \'{repo_name}\' not configured.")
+
+    product = repo_cfg.gcp_product
+    product_info = GCP_PRODUCT_API_MAP.get(product, {})
+
+    run = WorkflowRun(run_id="_scan", repo_name=repo_name, gcp_product=product)
+
+    result = await scan_gcp_service(repo_name=repo_name, run=run)
+
+    return {
+        "repo_name":          result.repo_name,
+        "gcp_product":        result.gcp_product,
+        "scan_date":          result.scan_date,
+        "total_features":     result.total_features,
+        "actionable_count":   result.actionable_count,
+        "summary":            result.summary,
+        "module_resources":   result.module_resources,
+        "docs_url":           product_info.get("docs_url", ""),
+        "features": [
+            {
+                "feature_name":        f.feature_name,
+                "description":         f.description,
+                "announced_date":      f.announced_date,
+                "terraform_impact":    f.terraform_impact,
+                "terraform_resources": f.terraform_resources,
+                "terraform_args":      f.terraform_args,
+                "ga_confirmed":        f.ga_confirmed,
+                "source":              f.source,
+                "source_url":          f.source_url,
+            }
+            for f in result.features
+        ],
+        "actionable_features": [
+            {
+                "feature_name":        f.feature_name,
+                "description":         f.description,
+                "terraform_impact":    f.terraform_impact,
+                "terraform_resources": f.terraform_resources,
+                "terraform_args":      f.terraform_args,
+                "ga_confirmed":        f.ga_confirmed,
+                "source_url":          f.source_url,
+            }
+            for f in result.actionable_features
+        ],
+        "logs": [
+            {"level": lg.level, "message": lg.message}
+            for lg in run.logs
+        ],
+    }
+
+
+# ── GET /products ─────────────────────────────────────────────────────────────
+
+@ga_router.get("/products")
+async def list_supported_products() -> dict:
+    """
+    List all GCP products/services that TerraScope can scan for GA features,
+    with their Discovery API names and release notes slugs.
+    """
+    return {
+        "supported_products": {
+            product: {
+                "api_name":    info["api_name"],
+                "version":     info["version"],
+                "docs_url":    info["docs_url"],
+                "tf_prefix":   info["tf_resource_prefix"],
+            }
+            for product, info in GCP_PRODUCT_API_MAP.items()
+        },
+        "total": len(GCP_PRODUCT_API_MAP),
     }

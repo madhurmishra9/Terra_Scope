@@ -27,6 +27,7 @@ from backend.ga_workflow.ga_models import (
     WorkflowStage,
 )
 from backend.ga_workflow.ga_detector import detect_ga_release
+from backend.ga_workflow.gcp_service_scanner import scan_gcp_service
 from backend.ga_workflow.ga_implementer import (
     create_ga_branch,
     generate_code_changes,
@@ -35,6 +36,8 @@ from backend.ga_workflow.ga_implementer import (
 from backend.ga_workflow.ga_validators import validate_all
 from backend.ga_workflow.ga_compat import check_provider_compatibility
 from backend.ga_workflow.ga_pr_manager import create_or_update_pr
+from backend.ga_workflow.gcp_service_detector import scan_gcp_service_features
+from backend.ga_workflow.ga_models import GCPServiceScanResult, GCPServiceFeatureModel
 
 # In-memory store of all workflow runs (keyed by run_id).
 # In production this could be Redis or a DB table; in-process is fine for
@@ -101,12 +104,75 @@ async def run_ga_workflow(request: GAWorkflowRequest) -> WorkflowRun:
     run.ga_release  = change_set.ga_release
     run.change_set  = change_set
 
+    # ────────────────────────────────────────────────────────────────────────
+    # Stage 1b — Scan GCP service for new GA features (runs alongside provider check)
+    # This is a separate signal: "what did GOOGLE CLOUD announce for this product?"
+    # independent of provider version changes.
+    # ────────────────────────────────────────────────────────────────────────
+    run.stage = WorkflowStage.SCANNING_SERVICE
+    run.log("Stage 1b/7 — Scanning GCP service release notes for new GA features")
+    try:
+        gcp_scan = await scan_gcp_service_features(
+            repo_name=request.repo_name,
+            run=run,
+            days_back=180,
+        )
+        if gcp_scan:
+            # Convert to Pydantic model for WorkflowRun serialization
+            run.gcp_service_scan = GCPServiceScanResult(
+                repo_name=gcp_scan.repo_name,
+                gcp_product=gcp_scan.gcp_product,
+                scan_date=gcp_scan.scan_date,
+                total_features=len(gcp_scan.features),
+                actionable_count=len(gcp_scan.actionable_features),
+                features=[GCPServiceFeatureModel(**f.to_dict()) for f in gcp_scan.features],
+                actionable_features=[GCPServiceFeatureModel(**f.to_dict()) for f in gcp_scan.actionable_features],
+                module_resources=gcp_scan.module_resources,
+                summary=gcp_scan.summary,
+            )
+            run.log(
+                f"GCP service scan: {gcp_scan.actionable_count} actionable new GA features "
+                f"found for {gcp_scan.gcp_product}"
+            )
+            # Merge actionable GCP service features into the change_set as additional GAChanges
+            from backend.ga_workflow.ga_models import GAChange, ChangeType
+            for feat in gcp_scan.actionable_features:
+                ct = (ChangeType.NEW_RESOURCE if feat.terraform_impact == "new_resource"
+                      else ChangeType.NEW_ARGUMENT)
+                for res_type in (feat.terraform_resources or [f"google_{gcp_scan.gcp_product}_resource"]):
+                    change_set.changes.append(GAChange(
+                        change_type=ct,
+                        resource_type=res_type,
+                        attribute_name=feat.terraform_args[0] if feat.terraform_args else None,
+                        description=f"[GCP Service GA] {feat.feature_name}: {feat.description[:150]}",
+                        provider_version=change_set.ga_release.latest_ga_version,
+                        breaking=False,
+                        source_url=feat.source_url,
+                    ))
+            run.log(f"Merged {len(gcp_scan.actionable_features)} GCP service features into change set")
+    except Exception as e:
+        run.log(f"GCP service scan failed ({e}) — continuing with provider-only changes", level="warning")
+
     if not change_set.ga_release.upgrade_required:
         run.log("Module is already on the latest GA provider version. Nothing to do.")
         run.stage = WorkflowStage.DONE
         run.overall_success = True
         run.completed_at = datetime.now(timezone.utc).isoformat()
         return run
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Stage 1b — Scan GCP service for new GA features beyond provider changelog
+    # ────────────────────────────────────────────────────────────────────────
+    run.log("Stage 1b/7 — Scanning GCP service for new GA features")
+    try:
+        gcp_scan = await scan_gcp_service(repo_name=request.repo_name, run=run)
+        run.gcp_service_scan = gcp_scan
+        run.log(
+            f"GCP service scan: {gcp_scan.total_features} features, "
+            f"{gcp_scan.actionable_count} actionable gaps"
+        )
+    except Exception as e:
+        run.log(f"GCP service scan failed (non-critical): {e}", level="warning")
 
     run.log(
         f"Upgrade: v{change_set.ga_release.current_version} → "

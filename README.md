@@ -5,6 +5,35 @@
 
 ---
 
+## 🚀 GA Release Workflow
+
+TerraScope includes a full **GA Release Workflow** that automates upgrading your modules to the latest Google Cloud provider GA release **and** scans the GCP service itself for new GA features not yet in your Terraform code.
+
+| Capability | Description |
+|-----------|-------------|
+| **Provider GA detection** | Queries Terraform Registry for latest stable provider version |
+| **GCP service scan** | Reads Google Cloud release notes + API Discovery for new GA features |
+| **Branch creation** | Creates `terrascope/ga-upgrade-vX.Y.Z` automatically |
+| **HCL code generation** | LLM generates updated `.tf` files for all detected changes |
+| **4-layer validation** | HCL syntax · required attributes · naming conventions · type checking |
+| **Provider compat check** | Verifies every new attribute exists in the target provider schema |
+| **PR create / update** | Opens a GitHub PR (or updates an existing one) with full change summary |
+
+**Quick start:**
+```bash
+# Detect latest GA version for a repo (no changes made)
+python -m backend.ga_workflow.ga_orchestrator --repo terraform-google-bigquery --detect-only
+
+# Run the full pipeline
+python -m backend.ga_workflow.ga_orchestrator --repo terraform-google-bigquery
+
+# Or click 🚀 GA Workflow in the UI top bar
+```
+
+📖 **Full documentation:** [GA_WORKFLOW_README.md](./GA_WORKFLOW_README.md)
+
+---
+
 ## Table of Contents
 
 1. [What TerraScope Does](#1-what-terrascope-does)
@@ -36,6 +65,10 @@
 13. [Supported GCP Products](#13-supported-gcp-products)
 14. [Troubleshooting](#14-troubleshooting)
 15. [FAQ](#15-faq)
+
+---
+
+**→ [GA Release Workflow Documentation](./GA_WORKFLOW_README.md)**
 
 ---
 
@@ -956,6 +989,67 @@ python -m backend.main  # Edit terrascope.config.yaml: server.port: 8001
 # Frontend on a different port
 cd frontend && npm run dev -- --port 5174
 ```
+
+---
+
+## 14a. GA Release Workflow — Quick Reference
+
+The GA Workflow is fully documented in [`GA_WORKFLOW_README.md`](./GA_WORKFLOW_README.md). This is a brief quick-reference.
+
+### What it detects
+
+**From the Terraform Provider** (`ga_detector.py`):
+- New arguments added to existing `google_*` resources
+- Deprecated/removed arguments
+- New `google_*` resource types
+- Provider version constraint changes
+
+**From the GCP Service itself** (`gcp_service_scanner.py`):
+- New GA features announced in Google Cloud release notes
+- New API capabilities from the Google API Discovery service
+- Gaps between what the GCP service supports and what the module covers
+- Classified by Terraform impact: `new_resource`, `new_argument`, `api_only`
+
+### GCP products supported for service scanning
+
+| Product | API Scanned | Release Notes |
+|---------|-------------|---------------|
+| BigQuery | `bigquery v2` | cloud.google.com/bigquery |
+| Cloud Storage | `storage v1` | cloud.google.com/storage |
+| Dataflow | `dataflow v1b3` | cloud.google.com/dataflow |
+| Pub/Sub | `pubsub v1` | cloud.google.com/pubsub |
+| Dataproc | `dataproc v1` | cloud.google.com/dataproc |
+| Cloud Composer | `composer v1` | cloud.google.com/composer |
+| Spanner | `spanner v1` | cloud.google.com/spanner |
+| Bigtable | `bigtable v2` | cloud.google.com/bigtable |
+| Dataplex | `dataplex v1` | cloud.google.com/dataplex |
+| Vertex AI | `aiplatform v1` | cloud.google.com/vertex-ai |
+| Datastream | `datastream v1` | cloud.google.com/datastream |
+
+### Key GA API endpoints
+
+```bash
+# Detect provider GA version only
+GET /api/ga/detect/{repo_name}
+
+# Scan GCP service for new features
+GET /api/ga/scan/{repo_name}
+
+# Run full pipeline
+POST /api/ga/workflow   body: {repo_name, base_branch, dry_run, auto_fix}
+
+# List all workflow runs
+GET /api/ga/runs
+
+# Check which GCP products are supported for scanning
+GET /api/ga/products
+```
+
+### UI navigation
+
+The **🚀 GA Workflow** button in the top bar switches to the GA panel, which has two tabs:
+- **🔄 GA Workflow** — run the 8-stage pipeline, see live stage progress, validation results, PR link
+- **📡 GCP Service Scan** — scan the GCP service for new GA features, browse by impact type
 
 ---
 
