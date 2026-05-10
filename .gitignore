@@ -1,0 +1,70 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+
+# ── Pytest ────────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.coveragerc
+
+# ── Distribution / packaging ──────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ── ChromaDB / vector store ───────────────────────────────────────────────────
+data/
+*.chroma/
+
+# ── Terraform repos (cloned locally — not tracked) ───────────────────────────
+repos/*/
+!repos/clone_or_keep_repos_here
+
+# ── Generated Terraform output ────────────────────────────────────────────────
+output/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+backend_test.log
+backend_err.log
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/src/node_modules/
+
+# ── Claude Code worktrees ─────────────────────────────────────────────────────
+.claude/worktrees/
+
+# ── Secrets / credentials ─────────────────────────────────────────────────────
+*.pem
+*.key
+service-account*.json
+credentials.json
