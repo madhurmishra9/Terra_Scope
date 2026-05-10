@@ -181,10 +181,10 @@ async def fetch_service_docs(provider: str, service_name: str) -> str:
     """Fetch and combine docs for all resources matching a service name."""
     resources = resolve_resources(service_name, provider)
     parts = [f"# Terraform Docs: {service_name} ({provider})\n"]
-    for resource in resources[:4]:
+    for resource in resources[:6]:
         doc = await fetch_resource_docs(provider, resource)
         if doc and not doc.startswith("["):
-            parts.append(f"\n## Resource: {resource}\n{doc[:3500]}")
+            parts.append(f"\n## Resource: {resource}\n{doc[:5000]}")
     return "\n".join(parts) if len(parts) > 1 else f"No documentation cached for {service_name}."
 
 
