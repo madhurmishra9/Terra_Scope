@@ -9,7 +9,7 @@ terrascope:
   llm:
     provider: ollama                  # ollama | lm_studio
     base_url: http://localhost:11434  # Ollama default
-    model: gemma3:4b                  # Local model name
+    model: gemma4                  # Local model name
     embedding_model: nomic-embed-text # Local embedding model
     temperature: 0.0                  # 0.0 = fully deterministic, fact-only
     max_tokens: 2048
@@ -21,7 +21,7 @@ terrascope:
     # strict: ONLY answer from indexed repo code. No LLM general knowledge.
     # balanced: Prefer repo code, supplement with LLM knowledge if needed.
     require_source_citation: true     # Every claim must cite a file+line
-    min_confidence_threshold: 0.65   # Below this → "I don't know" response
+    min_confidence_threshold: 0.70   # Below this → "I don't know" response
     max_retrieval_chunks: 8          # Top-K chunks to retrieve per query
     chunk_overlap_tokens: 50         # Overlap between adjacent chunks
 
@@ -33,8 +33,8 @@ terrascope:
   # ── Server Settings ────────────────────────────────────────
   server:
     host: 127.0.0.1
-    port: 8000
-    reload: true                      # Auto-reload on code changes
+    port: 8080
+    reload: false                      # Auto-reload on code changes
 
   # ── UI Settings ────────────────────────────────────────────
   ui:
@@ -57,7 +57,7 @@ repos:
     enabled: true
 
   # ── Example: GCS (Cloud Storage) ─────────────────────────
-  - name: terraform-google-gcs
+  - name: terraform-google-cloud-storage
     display_name: Cloud Storage
     local_path: ./repos/terraform-google-gcs
     gcp_product: storage
