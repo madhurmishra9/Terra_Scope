@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ── API client ────────────────────────────────────────────────────────────────
-const API    = "http://localhost:8080/api";
-const GA_API = "http://localhost:8080/api/ga";
+const API    = "http://localhost:8000/api";
+const GA_API = "http://localhost:8000/api/ga";
 
 async function apiGet(path, base = API) {
   const r = await fetch(`${base}${path}`);
@@ -629,7 +629,63 @@ function CopyButton({ text }) {
   );
 }
 
-function HighlightedCode({ content }) {
+function fileIcon(filename) {
+  const base = filename.split("/").pop();
+  if (base === "README.md") return "📖";
+  if (base === "main.tf") return "🏗";
+  if (base === "variables.tf") return "📋";
+  if (base === "outputs.tf") return "📤";
+  if (base === "versions.tf") return "📌";
+  if (base.endsWith(".tfvars.example") || base.endsWith(".tfvars")) return "⚙️";
+  if (base.endsWith(".tf")) return "🔧";
+  if (base.endsWith(".md")) return "📄";
+  return "📄";
+}
+
+function fileTabLabel(filename) {
+  // Shorten long subdirectory paths for display in tabs
+  if (filename === "examples/complete/main.tf") return "examples/main.tf";
+  if (filename === "terraform.tfvars.example") return ".tfvars.example";
+  return filename;
+}
+
+function MarkdownView({ content }) {
+  return (
+    <div style={{ padding:"16px 20px", maxWidth:720 }}>
+      {content.split("\n").map((line, i) => {
+        if (line.startsWith("# "))
+          return <h1 key={i} style={{ fontSize:16, color:"#E6EDF3", borderBottom:"1px solid #21262D", paddingBottom:8, marginBottom:12, fontFamily:"inherit" }}>{line.slice(2)}</h1>;
+        if (line.startsWith("## "))
+          return <h2 key={i} style={{ fontSize:13, color:"#C9D1D9", marginTop:16, marginBottom:6, fontFamily:"inherit" }}>{line.slice(3)}</h2>;
+        if (line.startsWith("### "))
+          return <h3 key={i} style={{ fontSize:12, color:"#8B949E", marginTop:10, marginBottom:4, fontFamily:"inherit" }}>{line.slice(4)}</h3>;
+        if (line.startsWith("| "))
+          return <div key={i} style={{ fontFamily:"monospace", fontSize:11, color:"#8B949E", lineHeight:1.8, borderBottom:"1px solid #21262D11" }}>{line}</div>;
+        if (line.startsWith("```"))
+          return <div key={i} style={{ height:4 }} />;
+        if (line.startsWith("- ") || line.startsWith("* "))
+          return <div key={i} style={{ fontSize:12, color:"#C9D1D9", lineHeight:1.7, paddingLeft:12, display:"flex", gap:6 }}><span style={{ color:"#484F58" }}>•</span>{line.slice(2)}</div>;
+        if (line.trim() === "")
+          return <div key={i} style={{ height:8 }} />;
+        return <div key={i} style={{ fontSize:12, color:"#C9D1D9", lineHeight:1.7 }}>{line}</div>;
+      })}
+    </div>
+  );
+}
+
+function HighlightedCode({ content, filename = "" }) {
+  const base = filename.split("/").pop();
+  if (base === "README.md") return <MarkdownView content={content} />;
+  if (base.endsWith(".tfvars.example") || base.endsWith(".tfvars")) {
+    return (
+      <pre style={{ margin:0, padding:"12px 16px", fontSize:11.5, lineHeight:1.7, fontFamily:"monospace", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
+        {content.split("\n").map((line, i) => {
+          const isComment = line.trim().startsWith("#");
+          return <span key={i} style={{ display:"block", color: isComment ? "#484F58" : "#C9D1D9" }}>{line}</span>;
+        })}
+      </pre>
+    );
+  }
   return (
     <pre style={{ margin:0, padding:"12px 16px", fontSize:11.5, lineHeight:1.7,
       fontFamily:"monospace", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
@@ -637,11 +693,12 @@ function HighlightedCode({ content }) {
         const isSecLine  = line.includes("⚠️ SECURITY:");
         const isCostLine = line.includes("💰 COST:");
         const isTfLine   = line.includes("🔧 TFLINT:");
-        const color = isSecLine ? "#F85149" : isCostLine ? "#FFA657" : isTfLine ? "#58A6FF" : "#C9D1D9";
-        const bg    = isSecLine ? "#F8514910" : isCostLine ? "#FFA65710" : isTfLine ? "#58A6FF10" : "transparent";
-        return (
-          <span key={i} style={{ display:"block", background:bg, color }}>{line}</span>
-        );
+        const isComment  = line.trim().startsWith("#") && !isSecLine && !isCostLine && !isTfLine;
+        const isKeyword  = /^\s*(resource|variable|output|locals|terraform|data|module|provider)\b/.test(line);
+        const color = isSecLine ? "#F85149" : isCostLine ? "#FFA657" : isTfLine ? "#58A6FF"
+          : isComment ? "#484F58" : isKeyword ? "#D2A8FF" : "#C9D1D9";
+        const bg = isSecLine ? "#F8514910" : isCostLine ? "#FFA65710" : isTfLine ? "#58A6FF10" : "transparent";
+        return <span key={i} style={{ display:"block", background:bg, color }}>{line}</span>;
       })}
     </pre>
   );
@@ -782,14 +839,17 @@ function CodeViewer({ files, outputDir, summary, usageExample, gitTag, validatio
             i => i.file === f.filename && i.severity === "error"
           ).length;
           return (
-            <button key={f.filename} onClick={() => setSelected(f.filename)} style={{
-              background:"none", border:"none", cursor:"pointer", padding:"7px 14px", fontSize:11,
-              fontFamily:"monospace", fontWeight: selected===f.filename ? 600 : 400,
-              color: selected===f.filename ? "#E6EDF3" : "#484F58",
-              borderBottom:`2px solid ${selected===f.filename ? "#58A6FF" : "transparent"}`,
-              whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:4,
-            }}>
-              {f.filename}
+            <button key={f.filename} onClick={() => setSelected(f.filename)}
+              title={f.filename}
+              style={{
+                background:"none", border:"none", cursor:"pointer", padding:"7px 12px", fontSize:11,
+                fontFamily:"monospace", fontWeight: selected===f.filename ? 600 : 400,
+                color: selected===f.filename ? "#E6EDF3" : "#484F58",
+                borderBottom:`2px solid ${selected===f.filename ? "#58A6FF" : "transparent"}`,
+                whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:4,
+              }}>
+              <span style={{ fontSize:12 }}>{fileIcon(f.filename)}</span>
+              {fileTabLabel(f.filename)}
               {errCount > 0 && (
                 <span style={{ fontSize:9, background:"#F85149", color:"#fff",
                   borderRadius:8, padding:"0 4px", lineHeight:"14px" }}>{errCount}</span>
@@ -807,7 +867,7 @@ function CodeViewer({ files, outputDir, summary, usageExample, gitTag, validatio
               padding:"6px 12px", background:"#0D1117", borderBottom:"1px solid #21262D", zIndex:1 }}>
               <CopyButton text={activeFile.content} />
             </div>
-            <HighlightedCode content={activeFile.content} />
+            <HighlightedCode content={activeFile.content} filename={activeFile.filename} />
           </>
         )}
       </div>
@@ -928,13 +988,32 @@ function CurationChat({ session, onAnswer, onGenerate, generating }) {
           </div>
         )}
 
-        {/* Generating spinner */}
+        {/* Generating spinner — 3-pass progress */}
         {isGenerating && (
-          <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 0", color:"#FFA657" }}>
-            <div style={{ display:"flex", gap:4 }}>
-              {[0,1,2].map(i => <div key={i} style={{ width:6, height:6, borderRadius:"50%", background:"#FFA657", animation:`blink 1.2s ${i*0.2}s ease-in-out infinite` }} />)}
+          <div style={{ background:"#161B22", border:"1px solid #FFA65733", borderRadius:8, padding:"14px 16px", marginTop:8 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12 }}>
+              <div style={{ display:"flex", gap:4 }}>
+                {[0,1,2].map(i => <div key={i} style={{ width:6, height:6, borderRadius:"50%", background:"#FFA657", animation:`blink 1.2s ${i*0.2}s ease-in-out infinite` }} />)}
+              </div>
+              <span style={{ fontSize:12, color:"#FFA657", fontWeight:600 }}>Generating Terraform module…</span>
             </div>
-            <span style={{ fontSize:12 }}>Generating Terraform code…</span>
+            {[
+              { label:"Pass A", desc:"main.tf — resources, locals, data sources", icon:"🏗" },
+              { label:"Pass B", desc:"variables.tf + outputs.tf", icon:"📋" },
+              { label:"Pass C", desc:"versions.tf · README.md · examples · .tfvars", icon:"📦" },
+            ].map((p, i) => (
+              <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"5px 0",
+                opacity: 0.4 + i * 0.1 }}>
+                <span style={{ fontSize:13 }}>{p.icon}</span>
+                <div>
+                  <span style={{ fontSize:11, color:"#FFA657", fontWeight:600 }}>{p.label}</span>
+                  <span style={{ fontSize:10.5, color:"#484F58", marginLeft:6 }}>{p.desc}</span>
+                </div>
+              </div>
+            ))}
+            <div style={{ fontSize:10, color:"#484F58", marginTop:10 }}>
+              3 LLM passes — typically 45–120 seconds with gemma3:4b
+            </div>
           </div>
         )}
 
@@ -1095,8 +1174,21 @@ function CurationPanel({ repos, health }) {
     if (!session) return;
     setGenerating(true); setError(null);
     try {
-      const view = await apiPost(`/curate/${session.session_id}/generate`, {});
-      setSession(view);
+      // Fire generation (long-running — 3 LLM passes)
+      apiPost(`/curate/${session.session_id}/generate`, {}).catch(() => {});
+      // Poll until done or error (avoids browser fetch timeout on slow hardware)
+      const poll = async () => {
+        for (let i = 0; i < 120; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            const view = await apiGet(`/curate/${session.session_id}`);
+            setSession(view);
+            if (view.status === "done" || view.status === "error") return;
+          } catch (_) {}
+        }
+        setError("Generation timed out — check the backend logs.");
+      };
+      await poll();
     } catch (e) { setError(e.message); }
     finally { setGenerating(false); }
   };
@@ -1121,7 +1213,14 @@ function CurationPanel({ repos, health }) {
         flexDirection:"column", background:"#161B22", flexShrink:0, overflowY:"auto" }}>
         <div style={{ padding:"12px 14px", borderBottom:"1px solid #21262D" }}>
           <div style={{ fontSize:12.5, fontWeight:700, color:"#E6EDF3", marginBottom:2 }}>🔧 Module Curation</div>
-          <div style={{ fontSize:10.5, color:"#484F58" }}>Generate or modify Terraform modules</div>
+          <div style={{ fontSize:10.5, color:"#484F58", marginBottom:6 }}>Generate complete Terraform modules</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            <span style={{ fontSize:9, color:"#3FB950", background:"#3FB95011", border:"1px solid #3FB95033", borderRadius:3, padding:"1px 6px" }}>7 files</span>
+            <span style={{ fontSize:9, color:"#58A6FF", background:"#58A6FF11", border:"1px solid #58A6FF33", borderRadius:3, padding:"1px 6px" }}>GCP · AWS · Azure</span>
+            {health?.network_available === false && (
+              <span style={{ fontSize:9, color:"#FFA657", background:"#FFA65711", border:"1px solid #FFA65733", borderRadius:3, padding:"1px 6px" }}>📡 Offline — using cache</span>
+            )}
+          </div>
         </div>
 
         <div style={{ padding:"14px", flex:1 }}>
@@ -1408,7 +1507,7 @@ export default function TerraScope() {
             display:"flex", alignItems:"center", justifyContent:"center", fontSize:12 }}>🔭</div>
           <span style={{ fontWeight:700, fontSize:14, color:"#E6EDF3" }}>TerraScope</span>
           <span style={{ fontSize:10, color:"#484F58", padding:"1px 5px",
-            background:"#21262D", borderRadius:3 }}>v2.0</span>
+            background:"#21262D", borderRadius:3 }}>v2.1</span>
         </div>
 
         {/* View toggle */}

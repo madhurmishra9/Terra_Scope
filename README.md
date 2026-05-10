@@ -16,6 +16,9 @@
 | **🌐 Multi-cloud** | GCP (`google`), AWS (`aws`), Azure (`azurerm`) — full provider support |
 | **📚 Registry doc fetching** | Scrapes and caches Terraform provider docs locally; smart offline/online detection |
 | **🔗 Cross-module references** | Resolves `module {}` sources from ChromaDB + Terraform Registry when generating code |
+| **⚡ 3-pass LLM generation** | Each file group gets a dedicated LLM call with a full token budget: Pass A → `main.tf`, Pass B → `variables.tf` + `outputs.tf`, Pass C → `versions.tf` + `README.md` + examples |
+| **📁 7-file complete module** | Every curation produces: `main.tf`, `variables.tf`, `outputs.tf`, `versions.tf`, `README.md`, `examples/complete/main.tf`, `terraform.tfvars.example` |
+| **🎯 Provider-specific Q&A** | 7 targeted questions per provider (GCP / AWS / Azure) covering workload, networking, IAM, encryption, HA, tagging, and cross-service integrations |
 
 ---
 
@@ -359,11 +362,11 @@ terrascope/
 │   │   ├── registry_api.py             ← GitHub raw → registry.terraform.io scrape fallback
 │   │   └── cache_manager.py            ← JSON cache at ./data/registry_cache/
 │   │
-│   ├── module_curator/                 ← NEW: Module generation pipeline
+│   ├── module_curator/                 ← Module generation pipeline
 │   │   ├── models.py                   ← CurationSession, GenerationResult, SessionView
 │   │   ├── curator.py                  ← Session orchestrator (in-memory store)
-│   │   ├── question_engine.py          ← LLM Q&A (5 questions, JSON output)
-│   │   ├── code_generator.py           ← Prompt builder + LLM call + .tf writer
+│   │   ├── question_engine.py          ← LLM Q&A (7 provider-specific questions, JSON output)
+│   │   ├── code_generator.py           ← 3-pass LLM generation → 7 output files per module
 │   │   └── module_fetcher.py           ← GitHub clone / local dir / ZIP / .tf upload
 │   │
 │   └── ga_workflow/                    ← GA Release automation (unchanged)
@@ -384,7 +387,12 @@ terrascope/
         ├── main.tf
         ├── variables.tf
         ├── outputs.tf
-        └── versions.tf
+        ├── versions.tf
+        ├── README.md
+        ├── terraform.tfvars.example
+        └── examples/
+            └── complete/
+                └── main.tf
 ```
 
 ---
@@ -496,7 +504,7 @@ The Curate view has a **left config panel** and a **right Q&A + code panel**.
 - **Initial Description** — optional seed text
 - **Start Session →** — begins the session
 
-After clicking Start, the right panel enters **Q&A mode** — the LLM asks up to 5 clarifying questions. Answer each in the chat box and press Enter. After all questions are answered, the **⚡ Generate Terraform Code** button appears.
+After clicking Start, the right panel enters **Q&A mode** — the LLM asks up to 7 clarifying questions tailored to your chosen provider (GCP / AWS / Azure). Answer each in the chat box and press Enter. After all questions are answered, the **⚡ Generate Terraform Code** button appears.
 
 Generated files appear in a **tabbed code viewer** with per-file Copy buttons. The output directory path is shown at the top.
 
@@ -528,22 +536,28 @@ Select a repo in the sidebar, switch to the **🚀 GA Workflow** view, configure
 Provider: GCP
 Service:  Cloud Run
 ---
-Q: What is the primary workload for this Cloud Run module?
-A: HTTP API serving ML inference results, needs auto-scaling
+Q: What is the primary workload for the Cloud Run module, and what GCP region(s) should it target?
+A: HTTP API for ML inference — us-central1 and europe-west1 via variables
 
-Q: Which regions should this deploy to?
-A: us-central1 and europe-west1, both via variables
+Q: Should resources be in an existing Shared VPC or will the module create its own VPC?
+A: Existing Shared VPC; accept var.vpc_connector_id
 
-Q: What are the security requirements?
-A: VPC connector, no public access, IAM invoker role required
+Q: Which GCP service accounts and IAM roles are needed? Should the module create them?
+A: Create a dedicated SA with roles/run.invoker for var.invoker_principal
 
-Q: Multiple environments (dev/staging/prod)?
-A: Yes, all via a single var.environment input
+Q: Is CMEK required? If so, which Cloud KMS key ring and key name?
+A: No CMEK for this module
 
-Q: Naming and tagging requirements?
-A: Prefix all resources with var.name_prefix, add team and env labels
+Q: Should the module support multi-region deployments or regional failover?
+A: Yes — deploy both regions via for_each over var.regions map
+
+Q: What mandatory resource labels must every GCP resource carry?
+A: team, environment, cost-center
+
+Q: Which other GCP services does this module integrate with?
+A: Secret Manager for env vars; Artifact Registry for the container image
 ---
-→ Generates: main.tf, variables.tf, outputs.tf, versions.tf
+→ Generates (7 files): main.tf · variables.tf · outputs.tf · versions.tf · README.md · examples/complete/main.tf · terraform.tfvars.example
 → Written to: ./output/cloud_run_20250509_153012/
 ```
 
@@ -746,10 +760,18 @@ Request for "Cloud Run" (GCP)
 To pre-download docs before going offline:
 
 ```bash
-# Via API
-curl -X POST "http://localhost:8000/api/registry/fetch?provider=google&service_name=Cloud+Run"
-curl -X POST "http://localhost:8000/api/registry/fetch?provider=aws&service_name=Lambda"
-curl -X POST "http://localhost:8000/api/registry/fetch?provider=azurerm&service_name=AKS"
+# Via API (JSON body)
+curl -X POST http://localhost:8000/api/registry/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "google", "service_name": "Cloud Run"}'
+
+curl -X POST http://localhost:8000/api/registry/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "aws", "service_name": "Lambda"}'
+
+curl -X POST http://localhost:8000/api/registry/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "azurerm", "service_name": "AKS"}'
 
 # Check cache status
 curl http://localhost:8000/api/registry/status
@@ -917,10 +939,13 @@ Returns `SessionView` with `result` populated:
   "status": "done",
   "result": {
     "files": [
-      { "filename": "main.tf", "content": "resource \"google_cloud_run_v2_service\" ..." },
-      { "filename": "variables.tf", "content": "variable \"project_id\" ..." },
-      { "filename": "outputs.tf", "content": "output \"service_url\" ..." },
-      { "filename": "versions.tf", "content": "terraform { required_version ..." }
+      { "filename": "main.tf",                    "content": "locals { ... } resource \"google_cloud_run_v2_service\" ..." },
+      { "filename": "variables.tf",               "content": "variable \"project_id\" { type = string ... }" },
+      { "filename": "outputs.tf",                 "content": "output \"service_url\" { ... }" },
+      { "filename": "versions.tf",                "content": "terraform { required_version = \">= 1.9.0\" ... }" },
+      { "filename": "README.md",                  "content": "# Terraform google Cloud Run Module ..." },
+      { "filename": "examples/complete/main.tf",  "content": "module \"cloud_run\" { source = \"../../\" ... }" },
+      { "filename": "terraform.tfvars.example",   "content": "project_id = \"my-gcp-project\" ..." }
     ],
     "summary": "Cloud Run module with VPC connectivity and no public access",
     "usage_example": "module \"cloud_run\" {\n  source = \"./\"\n  ...\n}",
@@ -943,10 +968,14 @@ Returns `SessionView` with `result` populated:
 }
 ```
 
-#### `POST /api/registry/fetch?provider=google&service_name=Cloud+Run`
-Manually trigger doc fetch and cache for a provider+service.
+#### `POST /api/registry/fetch`
+Manually trigger doc fetch and cache for a provider+service. Accepts a JSON body:
 ```json
-{ "provider": "google", "service": "Cloud Run", "chars": 14520 }
+{ "provider": "google", "service_name": "Cloud Run" }
+```
+Response:
+```json
+{ "provider": "google", "service_name": "Cloud Run", "fetched": true, "preview": "# Terraform Docs: Cloud Run (google)..." }
 ```
 
 ---
@@ -967,11 +996,19 @@ In-memory session store (`dict[session_id → CurationSession]`). Sessions progr
 
 ### 13.4 Question Engine (`backend/module_curator/question_engine.py`)
 
-Calls Ollama chat API directly (no pydantic-ai). Prompt asks for a JSON array of 5 strings. Strips markdown fences before `json.loads()`. Falls back to mode-specific hardcoded questions if the LLM output cannot be parsed.
+Calls Ollama chat API directly (no pydantic-ai). Prompt asks for a JSON array of **7** strings, specifying all 7 topic areas (workload, networking, IAM, encryption, HA, tagging, integrations). Strips markdown fences before `json.loads()`. Falls back to **provider-specific** hardcoded questions (separate sets for GCP, AWS, Azure) if the LLM output cannot be parsed.
 
 ### 13.5 Code Generator (`backend/module_curator/code_generator.py`)
 
-Builds a ~6000-token prompt combining: provider docs + spec document + existing `.tf` files + referenced modules + Q&A pairs. Calls Ollama with `max_tokens = min(4096, context_window // 2)`. Parses JSON response `{files: {filename: content}, summary, usage_example}`. Falls back to HCL-block extraction by filename markers if JSON fails.
+Uses **3 focused LLM passes** so each file group gets a dedicated full token budget (`max(3072, min(6144, context_window - 2048))` tokens per pass):
+
+| Pass | Prompt focuses on | Output files |
+|------|-------------------|--------------|
+| A | resources, locals, data sources, security defaults | `main.tf` |
+| B | all variables used in Pass A output + useful outputs | `variables.tf`, `outputs.tf` |
+| C | support files referencing Pass A+B content | `versions.tf`, `README.md`, `examples/complete/main.tf`, `terraform.tfvars.example` |
+
+Each pass uses `[FILE: name]...[/FILE]` markers. Missing files always fall back to provider-aware stubs (`_minimal_vars`, `_minimal_outputs`, `_minimal_example`, `_minimal_tfvars`). `_usage_from_files()` parses `variables.tf` to find required variables and generates a real module call with realistic example values per provider.
 
 For `self_curation`: after writing output files, also writes root-level `.tf` files to the repo path, `git add`s them, commits, and calls `repo.create_tag()`.
 
@@ -1061,7 +1098,9 @@ The working tree must be on a branch (not detached HEAD) and must not have uncom
 ### Registry docs show "[Offline — no cached docs]"
 Pre-populate the cache while online:
 ```bash
-curl -X POST "http://localhost:8000/api/registry/fetch?provider=google&service_name=Cloud+Run"
+curl -X POST http://localhost:8000/api/registry/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "google", "service_name": "Cloud Run"}'
 ```
 
 ### ChromaDB corruption after hard shutdown
@@ -1082,7 +1121,7 @@ Install [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visua
 A: No. If network is unavailable, it uses the local registry doc cache. Generation works 100% offline using Ollama. The first run of each service name fetches docs; subsequent runs use the cache (72h TTL).
 
 **Q: How long does code generation take?**  
-A: Typically 15–60 seconds with `gemma3:4b`. A larger model like `gemma3:12b` improves quality at the cost of 2–3× more time.
+A: Typically 45–120 seconds with `gemma3:4b` (3 LLM passes). A larger model like `gemma3:12b` improves quality at the cost of 2–3× more time per pass.
 
 **Q: Can I generate modules for services not in the known service map?**  
 A: Yes. Enter any service name — TerraScope will construct a plausible resource name (e.g. `google_my_service`) and generate code based on the Q&A answers alone. For best results, prime the cache first or ensure network access so it can scrape the registry.
@@ -1093,8 +1132,8 @@ A: No. It commits locally and creates a local tag. You push manually: `git push 
 **Q: Can I edit the generated files before they're committed (self-curation)?**  
 A: Yes — click **⚡ Generate Terraform Code**, then review the files in the code viewer. The commit only happens during the generate step. If you want to edit first, use **New Product** or **From Module** mode instead, edit the files in `./output/`, and then manually copy them to the repo.
 
-**Q: Why does the LLM ask the same 5 questions every time?**  
-A: If Ollama returns a non-JSON response, the question engine uses mode-specific fallback questions. This usually means the model is overloaded or the context was too long. Try a smaller prompt in the description field.
+**Q: Why does the LLM ask the same 7 questions every time?**  
+A: If Ollama returns a non-JSON response, the question engine uses provider-specific fallback questions (separate sets for GCP, AWS, Azure). This usually means the model is overloaded or the context was too long. Try a smaller prompt in the description field.
 
 **Q: How do I add a new cloud service to the registry map?**  
 A: Edit `SERVICE_TO_RESOURCE_PREFIX` in `backend/registry_fetcher/registry_api.py`. Add a lowercase service name key mapped to a list of Terraform resource type strings.

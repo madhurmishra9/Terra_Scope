@@ -2,14 +2,26 @@
 main.py — FastAPI backend for TerraScope.
 
 Endpoints:
-  GET  /api/health                    — Ollama + config status
-  GET  /api/repos                     — List configured repos
-  GET  /api/repos/{name}/tags         — Tags for a repo
-  POST /api/index                     — Trigger background indexing
-  GET  /api/index/status              — Indexing progress
-  POST /api/query                     — Query/analysis agent (grounded Q&A)
-  POST /api/generate                  — HCL generation pipeline (new)
-  GET  /api/generate/{job_id}         — Retrieve a completed generation job
+  GET  /api/health                            — Ollama + network status
+  GET  /api/repos                             — List configured repos
+  GET  /api/repos/{name}/tags                 — Tags for a repo
+  POST /api/index                             — Trigger background indexing
+  GET  /api/index/status                      — Indexing progress
+  POST /api/query                             — Query/analysis agent (grounded Q&A)
+  POST /api/generate                          — HCL generation pipeline
+  POST /api/generate/async                    — Async HCL generation
+  GET  /api/generate/{job_id}                 — Retrieve completed generation job
+
+  POST /api/curate/start                      — Create curation session
+  GET  /api/curate/{session_id}               — Poll session state
+  POST /api/curate/{session_id}/upload-doc    — Upload PDF/DOCX/TXT spec
+  POST /api/curate/{session_id}/upload-module — Upload ZIP or .tf file(s)
+  POST /api/curate/{session_id}/set-source    — Set GitHub / local source
+  POST /api/curate/{session_id}/answer        — Answer current clarifying question
+  POST /api/curate/{session_id}/generate      — Trigger Terraform code generation
+
+  GET  /api/registry/status                   — Registry cache stats + network status
+  POST /api/registry/fetch                    — Pre-fetch docs for a provider+service
 """
 from __future__ import annotations
 
@@ -18,9 +30,9 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from backend.config import get_config
 from backend.agent.models import (
@@ -31,6 +43,10 @@ from backend.agent.terrascope_agent import run_query, run_generation
 from backend.agent.tools.git_tools import list_tags_for_repo, get_latest_tag
 from backend.agent.tools.search_tools import is_indexed, get_indexed_tags, get_chunk_count
 from backend.indexer.repo_indexer import index_repo, index_all
+from backend.module_curator import curator
+from backend.module_curator.models import StartCurationRequest, SetSourceRequest, AnswerRequest
+from backend.registry_fetcher.registry_api import fetch_service_docs, is_network_available
+from backend.registry_fetcher.cache_manager import cache_stats
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -86,11 +102,12 @@ async def health():
     except Exception:
         pass
     return {
-        "status": "ok",
-        "ollama": "running" if ollama_ok else "unreachable — start Ollama first",
-        "model": cfg.llm.model,
-        "repos_configured": len(cfg.enabled_repos),
-        "grounding_mode": cfg.grounding.mode,
+        "status":            "ok",
+        "ollama":            "running" if ollama_ok else "unreachable — start Ollama first",
+        "model":             cfg.llm.model,
+        "repos_configured":  len(cfg.enabled_repos),
+        "grounding_mode":    cfg.grounding.mode,
+        "network_available": is_network_available(),
     }
 
 
@@ -266,6 +283,157 @@ async def get_generation_result(job_id: str):
     if result is None:
         return {"status": "pending", "job_id": job_id}
     return result
+
+
+# ── Curation ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/curate/start")
+async def curate_start(request: StartCurationRequest):
+    """Create a new curation session. Immediately triggers Q&A for new_product / self_curation."""
+    session = curator.create_session(request)
+    try:
+        if request.mode.value == "new_product":
+            await curator.start_new_product(session.session_id)
+        elif request.mode.value == "self_curation":
+            await curator.start_self_curation(session.session_id)
+        # from_document and from_module wait for an upload before Q&A starts
+    except Exception as exc:
+        session = curator.get_session(session.session_id)
+        if session:
+            session.error = str(exc)
+    return curator.to_view(curator.get_session(session.session_id))
+
+
+@app.get("/api/curate/{session_id}")
+async def curate_get(session_id: str):
+    """Poll session state (status, current question, generated files, etc.)."""
+    session = curator.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    return curator.to_view(session)
+
+
+@app.post("/api/curate/{session_id}/upload-doc")
+async def curate_upload_doc(session_id: str, file: UploadFile = File(...)):
+    """Upload a PDF, DOCX, or TXT specification document to seed the curation."""
+    session = curator.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    try:
+        from backend.document_processor.processor import extract_text
+        raw = await file.read()
+        text = extract_text(raw, file.filename or "upload.txt")
+        await curator.start_from_document(session_id, text)
+    except Exception as exc:
+        raise HTTPException(500, f"Document processing failed: {exc}")
+    return curator.to_view(curator.get_session(session_id))
+
+
+@app.post("/api/curate/{session_id}/upload-module")
+async def curate_upload_module(session_id: str, file: UploadFile = File(...)):
+    """Upload a ZIP archive or individual .tf file as the base module."""
+    session = curator.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    try:
+        raw = await file.read()
+        fname = file.filename or ""
+        if fname.endswith(".zip"):
+            await curator.start_from_zip(session_id, raw)
+        elif fname.endswith(".tf"):
+            await curator.start_from_tf_files(session_id, {fname: raw.decode("utf-8", errors="replace")})
+        else:
+            raise HTTPException(400, "Only .zip or .tf files are accepted")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Module upload failed: {exc}")
+    return curator.to_view(curator.get_session(session_id))
+
+
+@app.post("/api/curate/{session_id}/set-source")
+async def curate_set_source(session_id: str, request: SetSourceRequest):
+    """Set a GitHub repo URL or local filesystem path as the module source."""
+    session = curator.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    try:
+        if request.source_type == "github":
+            if not request.url:
+                raise HTTPException(400, "url is required for github source_type")
+            await curator.start_from_github(session_id, request.url, request.tag)
+        elif request.source_type == "local":
+            if not request.path:
+                raise HTTPException(400, "path is required for local source_type")
+            await curator.start_from_local(session_id, request.path)
+        else:
+            raise HTTPException(400, f"Unknown source_type '{request.source_type}'")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Source ingestion failed: {exc}")
+    return curator.to_view(curator.get_session(session_id))
+
+
+@app.post("/api/curate/{session_id}/answer")
+async def curate_answer(session_id: str, request: AnswerRequest):
+    """Submit the user's answer to the current clarifying question."""
+    session = curator.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    try:
+        await curator.answer_question(session_id, request.answer)
+    except Exception as exc:
+        raise HTTPException(500, f"Answer processing failed: {exc}")
+    return curator.to_view(curator.get_session(session_id))
+
+
+@app.post("/api/curate/{session_id}/generate")
+async def curate_generate(session_id: str):
+    """Trigger Terraform module generation for a session in READY state."""
+    session = curator.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    try:
+        result = await curator.generate(session_id)
+        return curator.to_view(curator.get_session(session_id))
+    except Exception as exc:
+        raise HTTPException(500, f"Code generation failed: {exc}")
+
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/registry/status")
+async def registry_status():
+    """Return cache statistics and network availability."""
+    try:
+        stats = cache_stats()
+    except Exception:
+        stats = {}
+    return {
+        "network_available": is_network_available(),
+        "cache":             stats,
+    }
+
+
+class RegistryFetchRequest(BaseModel):
+    provider:     str
+    service_name: str
+
+
+@app.post("/api/registry/fetch")
+async def registry_fetch(request: RegistryFetchRequest):
+    """Pre-fetch and cache provider documentation for a given service."""
+    try:
+        docs = await fetch_service_docs(request.provider, request.service_name)
+        return {
+            "provider":     request.provider,
+            "service_name": request.service_name,
+            "fetched":      not docs.startswith("No documentation"),
+            "preview":      docs[:500],
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Registry fetch failed: {exc}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
