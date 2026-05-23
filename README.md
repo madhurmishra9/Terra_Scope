@@ -44,7 +44,7 @@ python -m backend.ga_workflow.ga_orchestrator --repo terraform-google-bigquery -
 python -m backend.ga_workflow.ga_orchestrator --repo terraform-google-bigquery
 ```
 
-📖 **Full GA docs:** [GA_WORKFLOW_README.md](./GA_WORKFLOW_README.md)
+📖 **Full GA docs:** [GA_WORKFLOW_README.md](backend/ga_workflow/GA_WORKFLOW_README.md)
 
 ---
 
@@ -367,7 +367,9 @@ terrascope/
 │   │   ├── curator.py                  ← Session orchestrator (in-memory store)
 │   │   ├── question_engine.py          ← LLM Q&A (7 provider-specific questions, JSON output)
 │   │   ├── code_generator.py           ← 3-pass LLM generation → 7 output files per module
-│   │   └── module_fetcher.py           ← GitHub clone / local dir / ZIP / .tf upload
+│   │   ├── module_fetcher.py           ← GitHub clone / local dir / ZIP / .tf upload
+│   │   ├── local_repo_scanner.py       ← Scans ./repos/ for local Terraform modules (no ChromaDB needed)
+│   │   └── dependency_resolver.py      ← Recursively resolves module {} sources (local → repos → ChromaDB → registry)
 │   │
 │   └── ga_workflow/                    ← GA Release automation (unchanged)
 │

@@ -2,23 +2,39 @@
 curator.py — Session manager and orchestration for the Module Curation pipeline.
 
 State machine:
-  INIT → GATHERING → ASKING → READY → GENERATING → DONE | ERROR
+  INIT → GATHERING → ASKING → (ASKING_FOLLOWUP)? → READY → GENERATING → DONE | ERROR
+
+v2.1 additions
+==============
+* On session start (any mode), `./repos/` is scanned and any modules that look
+  relevant to the service_name are attached to the session.
+* When tf_files are present, dependent modules are resolved transitively
+  (local → repos/ → ChromaDB → Registry) and attached to the session.
+* After the user finishes the first round of Q&A the engine generates
+  follow-up questions; if any come back the session transitions to
+  ASKING_FOLLOWUP instead of READY.
 """
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from backend.module_curator.models import (
     CurationMode,
     CurationSession,
+    DependentModuleRef,
     GenerationResult,
+    LocalModuleRef,
     QAPair,
     SessionStatus,
     SessionView,
     StartCurationRequest,
 )
-from backend.module_curator.question_engine import generate_questions
+from backend.module_curator.question_engine import (
+    generate_followups,
+    generate_questions,
+)
 from backend.module_curator.code_generator import generate_terraform_code
 from backend.module_curator.module_fetcher import (
     extract_module_sources,
@@ -26,7 +42,16 @@ from backend.module_curator.module_fetcher import (
     fetch_from_local,
     fetch_from_zip,
 )
+from backend.module_curator.local_repo_scanner import (
+    find_matching_modules,
+    scan_local_modules,
+)
+from backend.module_curator.dependency_resolver import (
+    DependencyTree,
+    resolve_dependencies,
+)
 from backend.registry_fetcher.registry_api import fetch_service_docs
+
 
 # ── In-memory session store ───────────────────────────────────────────────────
 
@@ -69,6 +94,9 @@ def to_view(session: CurationSession) -> SessionView:
         registry_docs_available=bool(
             session.registry_docs and not session.registry_docs.startswith("[")
         ),
+        local_modules=session.local_modules,
+        dependent_modules=session.dependent_modules,
+        followup_round=session.followup_round,
         result=session.result,
         error=session.error,
         current_question=session.current_question,
@@ -80,47 +108,81 @@ def to_view(session: CurationSession) -> SessionView:
 
 async def _fetch_docs_if_needed(session: CurationSession) -> None:
     if session.service_name and not session.registry_docs:
-        session.registry_docs = await fetch_service_docs(
-            session.provider.value, session.service_name
-        )
-
-
-async def _resolve_cross_modules(session: CurationSession) -> None:
-    """Try to look up module sources in indexed ChromaDB collections."""
-    sources = extract_module_sources(session.tf_files)
-    for src in sources[:3]:
-        if src in session.referenced_modules:
-            continue
-        content = _search_chromadb(src)
-        if content:
-            session.referenced_modules[src] = content
-
-
-def _search_chromadb(source_hint: str) -> Optional[str]:
-    try:
-        from backend.agent.tools.search_tools import semantic_search, get_indexed_tags
-        from backend.config import get_config
-
-        cfg = get_config()
-        for repo in cfg.enabled_repos:
-            tags = get_indexed_tags(repo.name)
-            if not tags:
-                continue
-            results = semantic_search(
-                f"module source {source_hint}", repo.name, tags[0], n_results=3
+        try:
+            session.registry_docs = await fetch_service_docs(
+                session.provider.value, session.service_name
             )
-            if results:
-                return f"# From {repo.name}\n" + "\n".join(r.snippet for r in results)
-    except Exception:
-        pass
-    return None
+        except Exception as exc:
+            print(f"[curator] Registry fetch failed: {exc}")
+            session.registry_docs = ""
+
+
+def _scan_local_repos(session: CurationSession) -> None:
+    """Attach matching modules from ./repos/ to the session."""
+    if not session.service_name:
+        return
+    try:
+        matches = find_matching_modules(
+            session.service_name, session.provider.value, limit=5
+        )
+    except Exception as exc:
+        print(f"[curator] Local repo scan failed: {exc}")
+        return
+
+    session.local_modules = [
+        LocalModuleRef(
+            name=m.name,
+            display_name=m.display_name,
+            rel_path=m.rel_path,
+            resource_types=sorted(m.resource_types)[:10],
+            required_inputs=list(m.required_inputs.keys())[:10],
+            match_reason=(
+                f"matched on resource types / name / "
+                f"product={m.gcp_product}"
+            ),
+        )
+        for m in matches
+    ]
+
+
+async def _resolve_dependent_modules(session: CurationSession) -> None:
+    """Walk module {} references in tf_files and attach the resolved tree."""
+    if not session.tf_files:
+        return
+    try:
+        # Anchor for relative-path resolution: use the first repo dir we know about.
+        anchor: Optional[Path] = None
+        if session.local_modules:
+            from backend.module_curator.local_repo_scanner import get_module_by_name
+            mod = get_module_by_name(session.local_modules[0].name)
+            if mod:
+                anchor = mod.abs_path
+        tree: DependencyTree = await resolve_dependencies(
+            session.tf_files, root_dir=anchor, max_depth=2, max_total=15
+        )
+    except Exception as exc:
+        print(f"[curator] Dependency resolution failed: {exc}")
+        return
+
+    session.dependent_modules = [
+        DependentModuleRef(
+            raw_source=d.raw_source,
+            kind=d.kind,
+            depth=d.depth,
+            required_inputs=[n for n, v in d.inputs.items() if v.get("required")][:8],
+            outputs=list(d.outputs.keys())[:8],
+        )
+        for d in tree.dependencies
+    ]
 
 
 async def _start_asking(session: CurationSession) -> list[str]:
-    """Generate questions and transition to ASKING state."""
+    """Common entry — gather context, then generate first-round questions."""
     await _fetch_docs_if_needed(session)
+    _scan_local_repos(session)
+
     if session.tf_files:
-        await _resolve_cross_modules(session)
+        await _resolve_dependent_modules(session)
 
     questions = await generate_questions(session)
     session.questions = questions
@@ -198,7 +260,14 @@ async def start_self_curation(session_id: str) -> list[str]:
 # ── Q&A ───────────────────────────────────────────────────────────────────────
 
 async def answer_question(session_id: str, answer: str) -> Optional[str]:
-    """Record answer to the current question. Returns the next question or None."""
+    """
+    Record answer to the current question.
+
+    Returns the next question string, or None if the session has moved on.
+    When the last question is answered we run `generate_followups()` — if it
+    returns questions, the session transitions to ASKING_FOLLOWUP and a new
+    question is returned; otherwise the session transitions to READY.
+    """
     session = _get_or_raise(session_id)
 
     if session.current_question is None:
@@ -207,11 +276,26 @@ async def answer_question(session_id: str, answer: str) -> Optional[str]:
     session.qa_pairs.append(QAPair(question=session.current_question, answer=answer))
     session.current_question_idx += 1
 
-    if session.all_questions_answered:
-        session.status = SessionStatus.READY
-        return None
+    # If still more pre-asked questions, return the next one as-is.
+    if not session.all_questions_answered:
+        return session.current_question
 
-    return session.current_question
+    # All questions answered — see if we need follow-ups.
+    if session.followup_round < session.max_followup_rounds:
+        try:
+            followups = await generate_followups(session)
+        except Exception as exc:
+            print(f"[curator] Follow-up generation failed: {exc}")
+            followups = []
+
+        if followups:
+            session.questions.extend(followups)
+            session.followup_round += 1
+            session.status = SessionStatus.ASKING_FOLLOWUP
+            return session.current_question
+
+    session.status = SessionStatus.READY
+    return None
 
 
 # ── Code generation ───────────────────────────────────────────────────────────
@@ -222,6 +306,9 @@ async def generate(session_id: str) -> GenerationResult:
 
     try:
         result = await generate_terraform_code(session)
+        # Stamp the modules used onto the result so the UI can show them.
+        result.local_modules_used = list(session.local_modules)
+        result.dependent_modules  = list(session.dependent_modules)
         session.result = result
         session.status = SessionStatus.DONE
         return result

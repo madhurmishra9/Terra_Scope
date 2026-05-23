@@ -11,6 +11,7 @@ For SELF_CURATION mode: also commit and tag the existing git repo.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -130,6 +131,41 @@ def _build_main_prompt(session: CurationSession) -> str:
         parts.append("## CROSS-REFERENCED MODULES")
         for src, snippet in list(session.referenced_modules.items())[:3]:
             parts += [f"Source: {src}", snippet[:1200], ""]
+
+    # NEW v2.1 — modules discovered in ./repos/ that the generator must PREFER to call
+    if session.local_modules:
+        parts.append("## LOCAL REPOS (./repos/) — PREFER CALLING THESE OVER RE-IMPLEMENTING")
+        parts.append("The following Terraform modules already exist in the local repos/ folder.")
+        parts.append("If any of them implements the requirement, the generated main.tf MUST")
+        parts.append('call it via a module {} block using source = "../../repos/<name>"')
+        parts.append("(do NOT re-implement its resources inline). Map the user's required")
+        parts.append("values onto the module's listed required inputs.")
+        for m in session.local_modules[:5]:
+            res = ", ".join(m.resource_types[:6])
+            req = ", ".join(m.required_inputs[:8])
+            parts += [
+                f"  • {m.name}  →  source = \"../../repos/{m.name}\"",
+                f"      path:     {m.rel_path}",
+                f"      resources: {res or '(none parsed)'}",
+                f"      required:  {req or '(none)'}",
+            ]
+        parts.append("")
+
+    # NEW v2.1 — transitively-resolved dependent modules
+    if session.dependent_modules:
+        parts.append("## DEPENDENT MODULES (resolved from existing code)")
+        parts.append("These module sources are referenced (directly or transitively) from")
+        parts.append("the loaded code. When the generated main.tf calls them, set their")
+        parts.append("required inputs to values that match the user's answers below.")
+        for d in session.dependent_modules[:6]:
+            req = ", ".join(d.required_inputs[:6])
+            outs = ", ".join(d.outputs[:6])
+            parts += [
+                f"  • {d.raw_source}  [{d.kind}, depth {d.depth}]",
+                f"      required inputs: {req or '(none)'}",
+                f"      outputs:         {outs or '(none)'}",
+            ]
+        parts.append("")
 
     if session.qa_pairs:
         parts.append("## USER REQUIREMENTS (implement ALL of these)")
@@ -293,6 +329,26 @@ def _build_meta_prompt(session: CurationSession, files: dict[str, str]) -> str:
     return "\n".join(parts)
 
 
+def _build_prompt(session: CurationSession) -> str:
+    """Unified single-pass prompt used by tests and legacy callers.
+    Wraps _build_main_prompt and appends the full set of output-format markers."""
+    base = _build_main_prompt(session)
+    extra = "\n".join([
+        "[FILE: variables.tf]",
+        "# All input variables with type, description, validation",
+        "[/FILE]",
+        "[FILE: outputs.tf]",
+        "# All outputs with descriptions",
+        "[/FILE]",
+        "[FILE: versions.tf]",
+        "# terraform { required_version + required_providers }",
+        "[/FILE]",
+        "[SUMMARY]One-sentence description of what this module provisions[/SUMMARY]",
+        "[USAGE]Complete module call snippet with all required variables filled in[/USAGE]",
+    ])
+    return base + "\n" + extra
+
+
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
 async def _call_llm(prompt: str) -> str:
@@ -318,6 +374,27 @@ def _strip_fences(text: str) -> str:
     return text.replace("```", "").strip()
 
 
+def _try_parse_json(text: str) -> Optional[dict]:
+    """Try to parse a JSON dict from raw LLM output; handles fences and embedded JSON."""
+    stripped = _strip_fences(text)
+    try:
+        result = json.loads(stripped)
+        if isinstance(result, dict):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Find the first embedded JSON object using raw_decode (doesn't require EOL)
+    decoder = json.JSONDecoder()
+    idx = stripped.find("{")
+    while idx >= 0:
+        try:
+            result, _ = decoder.raw_decode(stripped, idx)
+            if isinstance(result, dict):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+        idx = stripped.find("{", idx + 1)
+    return None
 
 
 def _extract_file_markers(raw: str) -> dict[str, str]:
@@ -339,6 +416,12 @@ def _extract_section(raw: str, name: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _extract_block(raw: str, filename: str) -> str:
+    """Extract content between legacy '--- filename ---' separator markers."""
+    escaped = re.escape(filename)
+    pattern = re.compile(rf"---\s*{escaped}\s*---\n?(.*?)(?=---|\Z)", re.DOTALL)
+    m = pattern.search(raw)
+    return m.group(1).strip() if m else ""
 
 
 def _is_valid_hcl_content(content: str, filename: str) -> bool:
@@ -504,6 +587,73 @@ def _minimal_tfvars(session: CurationSession) -> str:
     return "\n".join(lines)
 
 
+def _parse_response(
+    raw: str, session: CurationSession
+) -> tuple[dict[str, str], str, str]:
+    """4-tier response parser → (files, summary, usage).
+
+    Tier 1: [FILE: name]...[/FILE] markers
+    Tier 2: JSON {"files": {...}, "summary": "...", "usage_example": "..."}
+    Tier 3: Legacy --- name --- separator markers
+    Tier 4: Provider-aware minimal fallback stubs
+    """
+    prov = session.provider.value
+    svc = session.service_name or "module"
+
+    def _fill_missing(files: dict[str, str]) -> None:
+        if "variables.tf" not in files:
+            files["variables.tf"] = _minimal_vars(session)
+        if "outputs.tf" not in files:
+            files["outputs.tf"] = _minimal_outputs(session)
+        if "versions.tf" not in files:
+            files["versions.tf"] = _minimal_versions(session)
+
+    # Tier 1 — [FILE: name]...[/FILE] markers
+    t1 = _extract_file_markers(raw)
+    if t1:
+        t1 = {k: v for k, v in t1.items() if _is_valid_hcl_content(v, k)}
+        if t1:
+            summary = _extract_section(raw, "SUMMARY")
+            usage = _extract_section(raw, "USAGE")
+            return t1, summary, usage
+
+    # Tier 2 — JSON {"files": {...}}
+    parsed = _try_parse_json(raw)
+    if parsed and "files" in parsed and isinstance(parsed["files"], dict):
+        t2 = {
+            k: v for k, v in parsed["files"].items()
+            if isinstance(v, str) and _is_valid_hcl_content(v, k)
+        }
+        if t2:
+            summary = str(parsed.get("summary", ""))
+            usage = str(parsed.get("usage_example", ""))
+            return t2, summary, usage
+
+    # Tier 3 — legacy --- filename --- markers
+    t3: dict[str, str] = {}
+    for fname in ("main.tf", "variables.tf", "outputs.tf", "versions.tf"):
+        block = _extract_block(raw, fname)
+        if block and _is_valid_hcl_content(block, fname):
+            t3[fname] = block
+    if t3:
+        _fill_missing(t3)
+        return t3, f"Terraform module for {svc}", ""
+
+    # Tier 4 — minimal fallback
+    t4: dict[str, str] = {
+        "main.tf": (
+            f"# {prov} {svc} — main.tf (auto-generated stub)\n\n"
+            "locals {\n"
+            f'  name_prefix = "${{var.environment}}-${{var.name}}"\n'
+            "}\n"
+        ),
+        "variables.tf": _minimal_vars(session),
+        "outputs.tf":   _minimal_outputs(session),
+        "versions.tf":  _minimal_versions(session),
+    }
+    return t4, f"Terraform module for {svc}", ""
+
+
 def _infer_example_value(var_name: str, provider: str = "google") -> str:
     name = var_name.lower()
     if "project" in name:
@@ -604,6 +754,63 @@ async def _apply_as_git_tag(
         return False
 
 
+# ── Module-source rewriter (v2.1) ────────────────────────────────────────────
+
+_MODULE_SOURCE_RE = re.compile(r'(source\s*=\s*)"([^"]+)"')
+
+
+def _rewrite_module_sources_to_local(content: str, session: CurationSession) -> str:
+    """
+    Walk every `source = "..."` in the generated HCL and, if the source matches
+    a module we know about in ./repos/, rewrite it to a stable relative path.
+
+    Why: the LLM often emits registry-style or github URLs even when told to
+    prefer local sources. This guarantees the generated code points at the
+    local copy the user actually has on disk.
+    """
+    if not session.local_modules and not session.dependent_modules:
+        return content
+
+    try:
+        from backend.module_curator.local_repo_scanner import resolve_source_locally
+    except Exception:
+        return content
+
+    # Build a quick lookup: module name → local rel path
+    local_by_name: dict[str, str] = {m.name: m.name for m in session.local_modules}
+
+    def _replace(match: re.Match) -> str:
+        prefix, source = match.group(1), match.group(2)
+        # Skip already-local sources
+        if source.startswith("./") or source.startswith("../"):
+            return match.group(0)
+
+        # Try to resolve to a local module
+        try:
+            local_mod = resolve_source_locally(source)
+        except Exception:
+            local_mod = None
+
+        if local_mod and local_mod.name in local_by_name:
+            new_source = f"../../repos/{local_mod.name}"
+            return f'{prefix}"{new_source}"'
+        return match.group(0)
+
+    return _MODULE_SOURCE_RE.sub(_replace, content)
+
+
+def _build_local_modules_used(content: str, session: CurationSession) -> list[str]:
+    """Return the names of local modules actually referenced in the final HCL."""
+    if not session.local_modules:
+        return []
+    used: set[str] = set()
+    for m in session.local_modules:
+        # match either ../../repos/<name> or the original name in source strings
+        if f"repos/{m.name}" in content or f'"{m.name}"' in content:
+            used.add(m.name)
+    return sorted(used)
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def generate_terraform_code(session: CurationSession) -> GenerationResult:
@@ -683,6 +890,14 @@ async def generate_terraform_code(session: CurationSession) -> GenerationResult:
 
     if not usage:
         usage = _usage_from_files(all_files, prov)
+
+    # ── v2.1: rewrite module sources to point at ./repos/ where we have a local copy ──
+    for fname in list(all_files.keys()):
+        if fname.endswith(".tf"):
+            try:
+                all_files[fname] = _rewrite_module_sources_to_local(all_files[fname], session)
+            except Exception as exc:
+                print(f"[code_generator] Source rewrite skipped for {fname}: {exc}")
 
     # ── Write output files ────────────────────────────────────────────────────
     out_dir = _output_dir(svc)

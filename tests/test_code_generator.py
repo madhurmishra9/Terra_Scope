@@ -274,7 +274,7 @@ def test_minimal_vars_gcp():
 def test_minimal_vars_aws():
     session = _session(provider=CloudProvider.AWS)
     result = _minimal_vars(session)
-    assert 'variable "project_id"' in result
+    assert 'variable "aws_account_id"' in result
     assert 'variable "region"' in result
     assert "us-east-1" in result
 
@@ -282,7 +282,7 @@ def test_minimal_vars_aws():
 def test_minimal_vars_azure():
     session = _session(provider=CloudProvider.AZURE)
     result = _minimal_vars(session)
-    assert 'variable "project_id"' in result
+    assert 'variable "resource_group_name"' in result
     assert 'variable "location"' in result
     assert "East US" in result
 
@@ -301,22 +301,22 @@ def test_minimal_versions_google():
     session = _session(provider=CloudProvider.GCP)
     result = _minimal_versions(session)
     assert "hashicorp/google" in result
-    assert ">= 5.0" in result
-    assert ">= 1.3" in result
+    assert "~> 5.40" in result
+    assert ">= 1.9.0" in result
 
 
 def test_minimal_versions_aws():
     session = _session(provider=CloudProvider.AWS)
     result = _minimal_versions(session)
     assert "hashicorp/aws" in result
-    assert ">= 5.0" in result
+    assert "~> 5.70" in result
 
 
 def test_minimal_versions_azure():
     session = _session(provider=CloudProvider.AZURE)
     result = _minimal_versions(session)
     assert "hashicorp/azurerm" in result
-    assert ">= 3.0" in result
+    assert "~> 3.110" in result
 
 
 def test_minimal_versions_is_valid_hcl():

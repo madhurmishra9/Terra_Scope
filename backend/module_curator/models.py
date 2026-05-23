@@ -24,13 +24,14 @@ class CloudProvider(str, Enum):
 
 
 class SessionStatus(str, Enum):
-    INIT       = "init"
-    GATHERING  = "gathering"   # Waiting for source (doc / module / etc.)
-    ASKING     = "asking"      # LLM is asking clarifying questions
-    READY      = "ready"       # All questions answered, ready to generate
-    GENERATING = "generating"
-    DONE       = "done"
-    ERROR      = "error"
+    INIT             = "init"
+    GATHERING        = "gathering"        # Waiting for source (doc / module / etc.)
+    ASKING           = "asking"           # LLM is asking primary clarifying questions
+    ASKING_FOLLOWUP  = "asking_followup"  # Engine determined more info is needed after first pass
+    READY            = "ready"            # All questions answered, ready to generate
+    GENERATING       = "generating"
+    DONE             = "done"
+    ERROR            = "error"
 
 
 class QAPair(BaseModel):
@@ -64,14 +65,35 @@ class CurationValidationResult(BaseModel):
     provider_schema_checked:   bool           = False
 
 
+class LocalModuleRef(BaseModel):
+    """Lightweight projection of a LocalModule for the SessionView."""
+    name:           str
+    display_name:   str
+    rel_path:       str
+    resource_types: list[str] = []
+    required_inputs: list[str] = []
+    match_reason:   str = ""
+
+
+class DependentModuleRef(BaseModel):
+    """Lightweight projection of a ResolvedDependency for the SessionView."""
+    raw_source:      str
+    kind:            str            # local | repos | chromadb | registry | unresolved
+    depth:           int            = 0
+    required_inputs: list[str] = []
+    outputs:         list[str] = []
+
+
 class GenerationResult(BaseModel):
-    files:           list[GeneratedFile]
-    summary:         str
-    usage_example:   str
-    output_dir:      str
-    git_tag_created: bool         = False
-    git_tag_name:    Optional[str] = None
-    validation:      Optional[CurationValidationResult] = None
+    files:             list[GeneratedFile]
+    summary:           str
+    usage_example:     str
+    output_dir:        str
+    git_tag_created:   bool         = False
+    git_tag_name:      Optional[str] = None
+    validation:        Optional[CurationValidationResult] = None
+    local_modules_used: list[LocalModuleRef] = []
+    dependent_modules:  list[DependentModuleRef] = []
 
 
 class CurationSession(BaseModel):
@@ -87,13 +109,19 @@ class CurationSession(BaseModel):
     # Gathered context
     document_text:      str              = ""
     tf_files:           dict[str, str]   = {}   # filename → HCL content
-    referenced_modules: dict[str, str]   = {}   # source URL/path → content snippet
+    referenced_modules: dict[str, str]   = {}   # source URL/path → content snippet (legacy)
     registry_docs:      str              = ""
 
+    # NEW in v2.1 — local repos integration
+    local_modules:     list[LocalModuleRef]     = []
+    dependent_modules: list[DependentModuleRef] = []
+
     # Q&A state
-    questions:            list[str]  = []
-    current_question_idx: int        = 0
+    questions:            list[str]    = []
+    current_question_idx: int          = 0
     qa_pairs:             list[QAPair] = []
+    followup_round:       int          = 0   # NEW
+    max_followup_rounds:  int          = 1   # NEW: cap to prevent infinite loops
 
     # Result / error
     status: SessionStatus      = SessionStatus.INIT
@@ -147,6 +175,9 @@ class SessionView(BaseModel):
     qa_pairs:                list[QAPair]
     tf_files_loaded:         list[str]
     registry_docs_available: bool
+    local_modules:           list[LocalModuleRef]     = []
+    dependent_modules:       list[DependentModuleRef] = []
+    followup_round:          int                      = 0
     result:                  Optional[GenerationResult] = None
     error:                   Optional[str]              = None
     current_question:        Optional[str]              = None
