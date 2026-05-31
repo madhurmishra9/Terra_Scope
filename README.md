@@ -1,7 +1,22 @@
 # 🔭 TerraScope
 
 > **AI-powered Terraform module curation for GCP, AWS, and Azure.**  
-> Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.
+> Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.  
+> **v2.3** — Multi-cloud GA Workflow with incremental updates, breaking change classification, and module troubleshooter.
+
+---
+
+## What's New in v2.3
+
+| Feature | Description |
+|---------|-------------|
+| **🌐 Multi-cloud GA Workflow** | Auto-detects GCP, AWS, or Azure provider from `versions.tf` — no config changes needed |
+| **📰 Cloud release note feeds** | Reads AWS What's New RSS, Azure Updates RSS, and GCP release notes per-service |
+| **🔁 Incremental updates** | Persists applied changes in `./data/ga_state/{repo}.json`; re-runs skip already-applied changes |
+| **⚠️ Breaking change classification** | Detects and labels WHY a change is breaking: `removed`, `renamed`, `type_changed`, `required_now`, `behavior_changed`, `deprecated_removed` |
+| **📝 Migration notes** | Each breaking change includes a plain-English migration guide in the PR |
+| **🏷️ Provider badge** | GA Workflow tab shows GCP / AWS / Azure provider chip next to version numbers |
+| **🔍 Module Troubleshooter** | New tab — detect logical and syntactic bugs in any module at any Git tag, with safe upgrade path |
 
 ---
 
@@ -22,27 +37,55 @@
 
 ---
 
-## 🚀 GA Release Workflow
+## 🚀 GA Release Workflow (v2.3 — Multi-Cloud)
 
-TerraScope includes a full **GA Release Workflow** that automates upgrading your modules to the latest Google Cloud provider GA release **and** scans the GCP service for new GA features not yet in your Terraform code.
+TerraScope includes a full **GA Release Workflow** that automates upgrading your Terraform modules to the latest provider GA release. In v2.3 it supports **GCP, AWS, and Azure** — the provider is auto-detected from each repo's `versions.tf`, with no configuration changes required.
 
 | Capability | Description |
 |-----------|-------------|
-| **Provider GA detection** | Queries Terraform Registry for latest stable provider version |
-| **GCP service scan** | Reads Google Cloud release notes + API Discovery for new GA features |
+| **Multi-cloud provider detection** | Auto-detects `hashicorp/google`, `hashicorp/aws`, or `hashicorp/azurerm` from `versions.tf` |
+| **Cloud release note feeds** | GCP: Google release notes · AWS: What's New RSS · Azure: Updates RSS |
+| **Incremental updates** | Skips changes already applied in a previous run (state in `./data/ga_state/`) |
+| **Breaking change classification** | Flags whether each change is breaking and why: `removed`, `renamed`, `type_changed`, `required_now`, `behavior_changed`, `deprecated_removed` |
+| **Migration notes** | Each breaking change includes a plain-English migration note in the PR description |
 | **Branch creation** | Creates `terrascope/ga-upgrade-vX.Y.Z` automatically |
-| **HCL code generation** | LLM generates updated `.tf` files for all detected changes |
+| **HCL code generation** | LLM generates updated `.tf` files for all new changes |
 | **4-layer validation** | HCL syntax · required attributes · naming conventions · type checking |
 | **Provider compat check** | Verifies every new attribute exists in the target provider schema |
-| **PR create / update** | Opens a GitHub PR with full change summary |
+| **PR create / update** | Opens a GitHub PR with full change summary and breaking-change annotations |
 
 ```bash
 # Detect latest GA version (no changes made)
 python -m backend.ga_workflow.ga_orchestrator --repo terraform-google-bigquery --detect-only
+python -m backend.ga_workflow.ga_orchestrator --repo terraform-aws-s3 --detect-only
 
-# Run the full pipeline
+# Run the full pipeline (provider auto-detected from versions.tf)
 python -m backend.ga_workflow.ga_orchestrator --repo terraform-google-bigquery
+python -m backend.ga_workflow.ga_orchestrator --repo terraform-aws-s3
+python -m backend.ga_workflow.ga_orchestrator --repo terraform-azurerm-aks
 ```
+
+### Breaking Change Classification
+
+Every change detected by the GA workflow is classified as safe or breaking. If breaking, the reason is one of:
+
+| Reason | Meaning |
+|--------|---------|
+| `removed` | A resource, block, or attribute was removed from the provider |
+| `renamed` | A resource or attribute was renamed (requires `moved {}` block or variable rename) |
+| `type_changed` | An attribute's type changed (e.g. `string` → `list`, `bool` → `object`) |
+| `required_now` | A previously optional argument is now required |
+| `behavior_changed` | Default value or runtime behavior changed without a signature change |
+| `deprecated_removed` | A previously deprecated attribute has been removed |
+
+Each breaking change also includes a `migration_note` — a plain-English instruction for the module consumer.
+
+### Incremental State
+
+The workflow persists applied changes to `./data/ga_state/{repo_name}.json`. On the next run:
+- Changes already applied (by SHA-256 hash of their key) are skipped.
+- Only genuinely new changes trigger code generation and a PR.
+- State is written only after a successful PR creation — aborted runs don't pollute state.
 
 📖 **Full GA docs:** [GA_WORKFLOW_README.md](backend/ga_workflow/GA_WORKFLOW_README.md)
 
@@ -64,6 +107,7 @@ python -m backend.ga_workflow.ga_orchestrator --repo terraform-google-bigquery
    - [Chat — Query Existing Modules](#91-chat--query-existing-modules)
    - [Curate — Generate New Modules](#92-curate--generate-new-modules)
    - [GA Workflow](#93-ga-workflow)
+   - [Troubleshoot](#94-troubleshoot)
 10. [Module Curation — Detailed Guide](#10-module-curation--detailed-guide)
     - [Mode 1: New Product](#101-mode-1-new-product)
     - [Mode 2: From Document](#102-mode-2-from-document)
@@ -97,6 +141,13 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 - Resolves cross-module references from ChromaDB and the Registry.
 - Writes output to `./output/{service}_{timestamp}/` and displays it in-browser for copy-paste.
 - Supports GCP, AWS, and Azure.
+
+### Troubleshoot (New in v2.3)
+- Analyses any module at any Git tag for logical and syntactic bugs — no `terraform init` or plan needed.
+- Three-stage pipeline: static analysis → LLM review → version recommendation.
+- Detects: undefined variable references, security misconfigurations, deprecated resources, type mismatches, missing provider constraints, anti-patterns.
+- Recommends the minimum provider version that fixes detected issues without introducing breaking changes for the module's resource types.
+- Works for GCP, AWS, and Azure modules.
 
 ### Example Chat Questions
 
@@ -134,6 +185,11 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 │  │  • 💬 Chat       │            │  │   git_tools · hcl_tools          │  │ │
 │  │  • 🔧 Curate     │            │  │   search_tools · issue_tools     │  │ │
 │  │  • 🚀 GA Workflow│            │  └────────────────┬─────────────────┘  │ │
+│  │  • 🧪 Scenarios  │            │                   │                    │ │
+│  │  • 🔍 Troubleshoot            │  ┌────────────────▼─────────────────┐  │ │
+│  └─────────────────┘            │  │  Troubleshooter Pipeline          │  │ │
+│                                 │  │  static_analysis · llm_review     │  │ │
+│                                 │  │  version_recommendation           │  │ │
 │  └─────────────────┘            │                   │                    │ │
 │                                 │  ┌────────────────▼─────────────────┐  │ │
 │                                 │  │  Module Curation Pipeline         │  │ │
@@ -371,7 +427,17 @@ terrascope/
 │   │   ├── local_repo_scanner.py       ← Scans ./repos/ for local Terraform modules (no ChromaDB needed)
 │   │   └── dependency_resolver.py      ← Recursively resolves module {} sources (local → repos → ChromaDB → registry)
 │   │
-│   └── ga_workflow/                    ← GA Release automation (unchanged)
+│   ├── ga_workflow/                    ← GA Release automation (v2.3 multi-cloud)
+│   │   ├── ga_models.py                ← Pydantic models (CloudProvider, BreakingReason, IncrementalState)
+│   │   ├── ga_detector.py              ← Multi-cloud provider detection + changelog parsing
+│   │   ├── cloud_service_scanner.py    ← AWS What's New + Azure Updates + GCP release note feeds
+│   │   ├── gcp_service_detector.py     ← Compat shim — routes to cloud_service_scanner
+│   │   ├── ga_orchestrator.py          ← 7-stage pipeline + incremental state tracking
+│   │   └── ga_router.py                ← FastAPI endpoints for GA workflow
+│   │
+│   └── troubleshooter/                 ← Module bug detection + version recommendation (NEW v2.3)
+│       ├── models.py                   ← TroubleshootIssue, VersionRecommendation, TroubleshootResult
+│       └── troubleshooter.py           ← Static analysis · LLM review · changelog-based version suggestion
 │
 ├── frontend/
 │   └── src/
@@ -380,10 +446,12 @@ terrascope/
 ├── repos/                              ← Your cloned Terraform repos
 ├── data/
 │   ├── chromadb/                       ← Vector index (auto-created)
-│   └── registry_cache/                 ← Provider doc cache (auto-created)
-│       ├── google/
-│       ├── aws/
-│       └── azurerm/
+│   ├── registry_cache/                 ← Provider doc cache (auto-created)
+│   │   ├── google/
+│   │   ├── aws/
+│   │   └── azurerm/
+│   └── ga_state/                       ← GA workflow incremental state (auto-created)
+│       └── {repo_name}.json            ← Applied change hashes per repo
 └── output/                             ← Generated modules (auto-created)
     └── cloud_run_20250509_143022/
         ├── main.tf
@@ -482,10 +550,10 @@ The `network_available` field is new in v2.0 — when `false`, the curation pipe
 
 ## 9. Using the UI
 
-The top bar now has **three views**:
+The top bar has **four views**:
 
 ```
-🔭 TerraScope v2.0  [💬 Chat] [🔧 Curate] [🚀 GA Workflow]
+🔭 TerraScope v2.3  [💬 Chat] [🔧 Curate] [🚀 GA Workflow] [🧪 Scenarios]
 ```
 
 ### 9.1 Chat — Query Existing Modules
@@ -512,7 +580,59 @@ Generated files appear in a **tabbed code viewer** with per-file Copy buttons. T
 
 ### 9.3 GA Workflow
 
-Select a repo in the sidebar, switch to the **🚀 GA Workflow** view, configure the base branch, and click **🚀 Run GA Workflow**. See [GA_WORKFLOW_README.md](./GA_WORKFLOW_README.md) for full details.
+Select a repo in the sidebar, switch to the **🚀 GA Workflow** view, and you'll see:
+
+- **Provider badge** — GCP / AWS / Azure chip auto-detected from `versions.tf`
+- **Version info** — current vs latest GA version, with "UPGRADE AVAILABLE" or "UP TO DATE" badge
+- **Breaking changes count** — red badge when breaking changes are present
+- **GA Workflow tab** — configure base branch, dry run, auto-fix, then click **🚀 Run GA Workflow**
+  - After completion: pipeline stage list, changes breakdown with breaking reason and migration notes, logs
+- **Cloud Scan tab** — scan the cloud service's release notes for new GA features not yet in the module
+
+See [GA_WORKFLOW_README.md](./GA_WORKFLOW_README.md) for full details.
+
+### 9.4 Troubleshoot
+
+Switch to the **🔍 Troubleshoot** tab to analyse any module for bugs without running `terraform plan`.
+
+**Left panel:**
+- **Repository** — dropdown of all configured repos
+- **Tag / Branch** — dropdown of all Git tags for the selected repo (type freely if not yet cloned)
+- **Problem / Error** — optional: paste an error message or describe the symptom to guide the LLM analysis
+- **Scan Module** — starts the three-stage pipeline
+
+**Right panel — results:**
+
+| Section | What it shows |
+|---------|---------------|
+| **Summary banner** | Error / warning / info counts at a glance |
+| **Version Recommendation** | Current vs recommended provider version · `SAFE UPGRADE` or `N BREAKING` badge · list of relevant fixes in the recommended version · link to changelog |
+| **Issue list** | Each issue has a severity icon (✗ / ⚠ / ℹ), category chip, file + line number, resource type, message, and expandable suggestion |
+
+**Severity filter** buttons let you focus on errors only, warnings only, or info items.
+
+**Example issues detected:**
+
+| Category | Example |
+|----------|---------|
+| `security` | `allUsers` in IAM binding — grants public access |
+| `security` | Hardcoded password in resource block |
+| `deprecated` | `uniform_bucket_level_access = false` on GCS bucket |
+| `undefined_ref` | `var.region` referenced but not declared in `variables.tf` |
+| `provider` | No `required_version` constraint in `versions.tf` |
+| `logic` | Missing `depends_on` for implicit resource dependency (LLM) |
+| `best_practice` | Variable `name` has no description |
+
+**Example version recommendation:**
+
+```
+Current: v4.0.0  →  Recommended: v5.12.0
+SAFE UPGRADE — no breaking changes affect this module's resources.
+
+Relevant fixes in v5.12.0:
+• google_bigquery_dataset: fixed IAM binding propagation delay
+• google_storage_bucket: corrected lifecycle rule type validation
+```
 
 ---
 
@@ -982,6 +1102,137 @@ Response:
 
 ---
 
+### Troubleshoot Endpoint (New in v2.3)
+
+#### `POST /api/troubleshoot`
+
+Analyse a Terraform module at a specific tag for bugs and get a safe upgrade recommendation.
+
+```json
+{
+  "repo_name": "terraform-google-bigquery",
+  "tag": "v2.1.0",
+  "problem_description": "terraform apply fails with 403 on dataset creation"
+}
+```
+
+Response:
+```json
+{
+  "repo_name": "terraform-google-bigquery",
+  "tag": "v2.1.0",
+  "scan_date": "2026-05-31T10:00:00Z",
+  "summary": "Found 2 errors, 1 warning in terraform-google-bigquery at v2.1.0. Recommended upgrade: v4.0.0 → v5.12.0 (no breaking changes).",
+  "error_count": 2,
+  "warning_count": 1,
+  "info_count": 3,
+  "scanned_files": ["main.tf", "variables.tf", "outputs.tf", "versions.tf"],
+  "version_recommendation": {
+    "current_version": "4.0.0",
+    "recommended_version": "5.12.0",
+    "reason": "Upgrade is safe — no breaking changes affect this module's resources.",
+    "breaking_changes": 0,
+    "safe_to_upgrade": true,
+    "changelog_url": "https://raw.githubusercontent.com/hashicorp/terraform-provider-google/main/CHANGELOG.md",
+    "fixes_in_version": [
+      "google_bigquery_dataset: fixed IAM binding propagation delay",
+      "google_storage_bucket: corrected lifecycle rule type validation"
+    ]
+  },
+  "issues": [
+    {
+      "severity": "error",
+      "category": "security",
+      "file_path": "main.tf",
+      "line": 42,
+      "resource_type": "google_project_iam_binding",
+      "resource_name": "dataset_viewer",
+      "message": "IAM member 'allUsers' grants public access to the project.",
+      "suggestion": "Restrict to specific service accounts or groups.",
+      "fixed_in_version": null
+    },
+    {
+      "severity": "warning",
+      "category": "deprecated",
+      "file_path": "main.tf",
+      "line": 17,
+      "resource_type": "google_storage_bucket",
+      "resource_name": "raw",
+      "message": "uniform_bucket_level_access = false is deprecated and insecure.",
+      "suggestion": "Set uniform_bucket_level_access = true for consistent IAM.",
+      "fixed_in_version": null
+    }
+  ]
+}
+```
+
+**Fields:**
+- `tag` — omit to use the latest Git tag
+- `problem_description` — optional symptom text that guides the LLM analysis
+
+---
+
+### GA Workflow Endpoints (New in v2.3)
+
+#### `GET /api/ga/detect/{repo_name}`
+
+Detect the latest GA provider version and compare to what the module uses. Auto-detects cloud provider.
+
+```json
+{
+  "repo_name": "terraform-google-bigquery",
+  "cloud_provider": "google",
+  "current_version": "5.38.0",
+  "latest_ga_version": "5.42.0",
+  "upgrade_required": true,
+  "breaking_changes": 1,
+  "new_features": 3,
+  "changes": [
+    {
+      "change_type": "removed",
+      "resource_type": "google_bigquery_dataset",
+      "attribute": "default_encryption_configuration",
+      "description": "Attribute removed in 5.40",
+      "breaking": true,
+      "breaking_reason": "removed",
+      "migration_note": "Remove 'default_encryption_configuration' from google_bigquery_dataset; use google_bigquery_dataset_iam_binding for encryption settings.",
+      "cloud_provider": "google"
+    }
+  ]
+}
+```
+
+#### `POST /api/ga/workflow`
+
+Run the full 7-stage GA upgrade pipeline for a repo.
+
+```json
+{
+  "repo_name": "terraform-google-bigquery",
+  "base_branch": "main",
+  "dry_run": false,
+  "auto_fix": true
+}
+```
+
+#### `GET /api/ga/scan/{repo_name}`
+
+Scan the cloud service associated with this repo for new GA features not yet in the module code. Auto-detects provider from `versions.tf`.
+
+#### `GET /api/ga/products`
+
+List all supported cloud products across GCP, AWS, and Azure.
+
+```json
+{
+  "total": 43,
+  "by_cloud": { "gcp": 23, "aws": 10, "azure": 10 },
+  "supported_products": { ... }
+}
+```
+
+---
+
 ## 13. Code Deep Dive
 
 ### 13.1 Config Loader (`backend/config.py`)
@@ -1036,6 +1287,36 @@ Chunks `.tf` files at HCL block boundaries (resource/variable/output/data). Each
 ### 13.10 FastAPI Backend (`backend/main.py`)
 
 All routes in one file. Curation endpoints are session-based (stateless HTTP, server-side session store). File uploads use `UploadFile` from `python-multipart`. Background indexing via `BackgroundTasks` + `run_in_executor`.
+
+### 13.11 Module Troubleshooter (`backend/troubleshooter/`)
+
+Three-stage async pipeline, all reading from Git history — no working tree checkout needed:
+
+**Stage 1 — Static analysis** (`_static_analysis`)
+
+| Check | How |
+|-------|-----|
+| HCL parse errors | `parse_hcl_content()` on every `.tf` file; flags files that return `{}` on non-empty input |
+| Undefined `var.X` / `local.X` | Regex scan of raw file content against declared variable/local names |
+| Missing variable descriptions | Walk `variable {}` blocks in parsed AST |
+| Deprecated resource patterns | 5 regex patterns covering GCP/AWS/Azure anti-patterns |
+| Security anti-patterns | 5 regex patterns: public IAM, insecure ingress, weak SSL, missing prevent_destroy, hardcoded passwords |
+| Provider constraints | `get_provider_requirements()` — flags missing `required_version`, missing version pins, overly permissive constraints |
+
+**Stage 2 — LLM analysis** (`_llm_analysis`)
+
+Sends a compact representation of the module (max 6000 chars, priority order: `main.tf` → `variables.tf` → rest) plus the optional user problem description to Ollama. Asks for a structured JSON array of issues covering: logic bugs, type mismatches, missing `depends_on`, anti-patterns, security, and deprecated usage. Response parsed with regex extraction + `json.loads()`.
+
+**Stage 3 — Version recommendation** (`_version_recommendation`)
+
+1. Detects provider from `versions.tf` via `detect_terraform_provider()`
+2. Gets current version and latest GA version from Terraform Registry
+3. Downloads full CHANGELOG.md for the provider
+4. `_parse_changelog_versions()` splits the changelog into per-version sections
+5. Walks versions ascending from current, extracting BUG FIXES and BREAKING CHANGES sections
+6. Counts breaking changes that match the module's resource type prefixes (`_count_relevant()`)
+7. Returns the minimum version with relevant fixes and zero breaking changes for the module's resources
+8. If every candidate version has breaking changes, reports the first version with fixes and notes the breaking count
 
 ---
 
@@ -1142,3 +1423,18 @@ A: Edit `SERVICE_TO_RESOURCE_PREFIX` in `backend/registry_fetcher/registry_api.p
 
 **Q: Is the Chat (query) view affected by the v2.0 changes?**  
 A: No. The query pipeline (`/api/query`), indexer, and ChromaDB are unchanged. All v2.0 additions are additive.
+
+**Q: Does the Troubleshooter require the repo to be cloned locally?**  
+A: Yes — it reads `.tf` file contents from the local Git history via `git show`. The repo must be cloned under `./repos/` (or the path in `terrascope.config.yaml`) before troubleshooting works. If files can't be read, the static analysis returns a provider-constraint warning and the LLM stage is skipped.
+
+**Q: Can I troubleshoot a specific old tag that no longer exists on the remote?**  
+A: Yes. The troubleshooter reads from your local Git history, so any tag that exists in the local clone (even if deleted from the remote) is analysable. Select it from the Tag dropdown.
+
+**Q: How accurate is the LLM analysis in the Troubleshooter?**  
+A: The static analysis (undefined references, security patterns, deprecated resources, provider constraints) is fully deterministic. The LLM stage adds logical analysis — quality depends on the model. With `gemma3:4b` expect good coverage of obvious anti-patterns; a larger model (`gemma3:12b`) gives more thorough results. Always review LLM suggestions — they can occasionally flag false positives.
+
+**Q: How does the version recommendation decide "safe to upgrade"?**  
+A: It parses the CHANGELOG.md for every provider version between your current version and the latest GA. A version is considered "breaking for this module" only if its `### BREAKING CHANGES` section mentions resource types that are actually used in your module. If no such breaking changes appear in the recommended version's entry, it's marked `SAFE UPGRADE`.
+
+**Q: What Terraform providers does the Troubleshooter support?**  
+A: All three: `hashicorp/google` (GCP), `hashicorp/aws`, and `hashicorp/azurerm`. The provider is auto-detected from `versions.tf`. Security and deprecated-usage patterns are provider-specific; the LLM analysis works for any provider.

@@ -41,6 +41,13 @@ terrascope:
     port: 5173
     theme: dark
 
+  # ── Scenario Generator Settings ────────────────────────────
+  scenario_generator:
+    terraform_bin: terraform          # Path to terraform binary (or just "terraform" if on PATH)
+    tf_cli_config_file: ""            # Path to .terraformrc for offline provider mirrors
+    max_fix_iters: 3                  # Max fixer-agent iterations per failing scenario
+    run_terraform_test: true          # Use "terraform test" with mock_provider (requires tf >= 1.6)
+
 # ============================================================
 #  REPOS — Add your Terraform module repos here.
 #  Each entry is one product / module group.

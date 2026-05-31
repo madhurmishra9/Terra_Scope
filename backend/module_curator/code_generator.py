@@ -811,6 +811,96 @@ def _build_local_modules_used(content: str, session: CurationSession) -> list[st
     return sorted(used)
 
 
+# ── Typed pass wrappers (consumed by CurationPipeline) ───────────────────────
+
+async def _run_pass_a(session: CurationSession) -> "GenerationPassResult":
+    """Run Pass A (main.tf) and return a typed GenerationPassResult."""
+    from backend.pipeline.models import GenerationPassResult
+
+    prov = session.provider.value
+    svc  = session.service_name or "module"
+    print(f"[code_generator] Pass A — main.tf ({svc}, {prov})")
+    try:
+        raw = await _call_llm(_build_main_prompt(session))
+    except Exception as exc:
+        print(f"[code_generator] Pass A LLM call failed: {exc}")
+        raw = ""
+
+    files = {k: v for k, v in _extract_file_markers(raw).items() if _is_valid_hcl_content(v, k)}
+    fallback_used = False
+    if "main.tf" not in files:
+        fallback_used = True
+        files["main.tf"] = (
+            f"# {prov} {svc} — main.tf (auto-generated stub)\n\n"
+            "locals {\n"
+            f'  name_prefix = "${{var.environment}}-${{var.name}}"\n'
+            f'  common_tags = {{\n'
+            '    ManagedBy   = "terraform"\n'
+            f'    Module      = "{svc}"\n'
+            '    Environment = var.environment\n'
+            '  }\n'
+            "}\n"
+        )
+    return GenerationPassResult(pass_name="A", raw=raw, files=files, fallback_used=fallback_used)
+
+
+async def _run_pass_b(session: CurationSession, main_tf_raw: str) -> "GenerationPassResult":
+    """Run Pass B (variables.tf + outputs.tf) and return a typed GenerationPassResult."""
+    from backend.pipeline.models import GenerationPassResult
+
+    main_tf_content = _extract_file_markers(main_tf_raw).get("main.tf", main_tf_raw[:5500])
+    print(f"[code_generator] Pass B — variables.tf + outputs.tf")
+    try:
+        raw = await _call_llm(_build_vars_prompt(session, main_tf_content))
+    except Exception as exc:
+        print(f"[code_generator] Pass B LLM call failed: {exc}")
+        raw = ""
+
+    files = {k: v for k, v in _extract_file_markers(raw).items() if _is_valid_hcl_content(v, k)}
+    fallback_used = False
+    if "variables.tf" not in files:
+        fallback_used = True
+        files["variables.tf"] = _minimal_vars(session)
+    if "outputs.tf" not in files:
+        fallback_used = True
+        files["outputs.tf"] = _minimal_outputs(session)
+    return GenerationPassResult(pass_name="B", raw=raw, files=files, fallback_used=fallback_used)
+
+
+async def _run_pass_c(session: CurationSession, all_files: dict[str, str]) -> "GenerationPassResult":
+    """Run Pass C (versions.tf + README + examples) and return a typed GenerationPassResult."""
+    from backend.pipeline.models import GenerationPassResult
+
+    prov = session.provider.value
+    svc  = session.service_name or "module"
+    print(f"[code_generator] Pass C — versions.tf, README.md, examples")
+    try:
+        raw = await _call_llm(_build_meta_prompt(session, all_files))
+    except Exception as exc:
+        print(f"[code_generator] Pass C LLM call failed: {exc}")
+        raw = ""
+
+    files = {k: v for k, v in _extract_file_markers(raw).items() if _is_valid_hcl_content(v, k)}
+    fallback_used = False
+    if "versions.tf" not in files:
+        fallback_used = True
+        files["versions.tf"] = _minimal_versions(session)
+    if "README.md" not in files:
+        fallback_used = True
+        files["README.md"] = (
+            f"# Terraform {prov} {svc} Module\n\n"
+            f"Production-ready {prov} Terraform module for **{svc}**.\n\n"
+            f"## Usage\n\n```hcl\n{_usage_from_files(all_files, prov)}\n```\n"
+        )
+    if "examples/complete/main.tf" not in files:
+        fallback_used = True
+        files["examples/complete/main.tf"] = _minimal_example(session)
+    if "terraform.tfvars.example" not in files:
+        fallback_used = True
+        files["terraform.tfvars.example"] = _minimal_tfvars(session)
+    return GenerationPassResult(pass_name="C", raw=raw, files=files, fallback_used=fallback_used)
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def generate_terraform_code(session: CurationSession) -> GenerationResult:

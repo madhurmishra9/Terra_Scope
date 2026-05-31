@@ -5,6 +5,12 @@ Executes all seven stages in sequence, updating the WorkflowRun state machine
 after each stage. Any unrecovered exception in a stage calls run.fail() and
 returns early — downstream stages are not executed.
 
+Multi-cloud support (v2.3):
+  - Auto-detects cloud provider (google/aws/azurerm) from versions.tf
+  - Routes service scan to GCP / AWS / Azure scanner automatically
+  - Incremental state: skips changes already applied in a previous run
+    (state persisted in ./data/ga_state/{repo_name}.json)
+
 Public API:
   run_ga_workflow(request) → WorkflowRun   (used by FastAPI router)
 
@@ -15,19 +21,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import json
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from backend.config import get_config
 from backend.ga_workflow.ga_models import (
+    GAChange,
     GAWorkflowRequest,
+    IncrementalState,
     WorkflowRun,
     WorkflowStage,
 )
-from backend.ga_workflow.ga_detector import detect_ga_release
-from backend.ga_workflow.gcp_service_scanner import scan_gcp_service
+from backend.ga_workflow.ga_detector import detect_ga_release, detect_terraform_provider
+from backend.ga_workflow.gcp_service_detector import scan_gcp_service_features
 from backend.ga_workflow.ga_implementer import (
     create_ga_branch,
     generate_code_changes,
@@ -36,13 +47,50 @@ from backend.ga_workflow.ga_implementer import (
 from backend.ga_workflow.ga_validators import validate_all
 from backend.ga_workflow.ga_compat import check_provider_compatibility
 from backend.ga_workflow.ga_pr_manager import create_or_update_pr
-from backend.ga_workflow.gcp_service_detector import scan_gcp_service_features
-from backend.ga_workflow.ga_models import GCPServiceScanResult, GCPServiceFeatureModel
 
 # In-memory store of all workflow runs (keyed by run_id).
-# In production this could be Redis or a DB table; in-process is fine for
-# a single-server curation tool.
 _runs: dict[str, WorkflowRun] = {}
+
+_STATE_DIR = Path("./data/ga_state")
+
+
+# ── Incremental state helpers ─────────────────────────────────────────────────
+
+def _change_hash(change: GAChange) -> str:
+    """Stable content hash for a GAChange — used to detect already-applied changes."""
+    key = f"{change.change_type}:{change.resource_type}:{change.attribute_name}:{change.provider_version}"
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def load_incremental_state(repo_name: str) -> IncrementalState:
+    path = _STATE_DIR / f"{repo_name}.json"
+    if path.exists():
+        try:
+            return IncrementalState(**json.loads(path.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return IncrementalState(repo_name=repo_name)
+
+
+def save_incremental_state(state: IncrementalState) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _STATE_DIR / f"{state.repo_name}.json"
+    path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+
+
+def filter_new_changes(changes: list[GAChange], state: IncrementalState) -> list[GAChange]:
+    """Return only changes whose hash is NOT already in the applied state."""
+    seen = set(state.applied_change_hashes)
+    return [c for c in changes if _change_hash(c) not in seen]
+
+
+def mark_changes_applied(changes: list[GAChange], state: IncrementalState) -> IncrementalState:
+    """Add change hashes to state (call after successful PR creation)."""
+    new_hashes = [_change_hash(c) for c in changes]
+    existing = set(state.applied_change_hashes)
+    state.applied_change_hashes = list(existing | set(new_hashes))
+    state.last_scan = datetime.now(timezone.utc).isoformat()
+    return state
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -82,6 +130,13 @@ async def run_ga_workflow(request: GAWorkflowRequest) -> WorkflowRun:
         run.fail(f"Repo '{request.repo_name}' not found in terrascope.config.yaml.")
         return run
 
+    # Load incremental state for this repo
+    inc_state = load_incremental_state(request.repo_name)
+    run.log(
+        f"Incremental state: {len(inc_state.applied_change_hashes)} previously applied change(s) "
+        f"(last scan: {inc_state.last_scan or 'never'})"
+    )
+
     # ────────────────────────────────────────────────────────────────────────
     # Stage 1 + 2 — Detect GA release and analyse changes
     # ────────────────────────────────────────────────────────────────────────
@@ -101,59 +156,18 @@ async def run_ga_workflow(request: GAWorkflowRequest) -> WorkflowRun:
         run.fail("detect_ga_release() returned None — check logs above.")
         return run
 
-    run.ga_release  = change_set.ga_release
-    run.change_set  = change_set
+    run.ga_release = change_set.ga_release
+    run.change_set = change_set
 
-    # ────────────────────────────────────────────────────────────────────────
-    # Stage 1b — Scan GCP service for new GA features (runs alongside provider check)
-    # This is a separate signal: "what did GOOGLE CLOUD announce for this product?"
-    # independent of provider version changes.
-    # ────────────────────────────────────────────────────────────────────────
-    run.stage = WorkflowStage.SCANNING_SERVICE
-    run.log("Stage 1b/7 — Scanning GCP service release notes for new GA features")
-    try:
-        gcp_scan = await scan_gcp_service_features(
-            repo_name=request.repo_name,
-            run=run,
-            days_back=180,
-        )
-        if gcp_scan:
-            # Convert to Pydantic model for WorkflowRun serialization
-            run.gcp_service_scan = GCPServiceScanResult(
-                repo_name=gcp_scan.repo_name,
-                gcp_product=gcp_scan.gcp_product,
-                scan_date=gcp_scan.scan_date,
-                total_features=len(gcp_scan.features),
-                actionable_count=len(gcp_scan.actionable_features),
-                features=[GCPServiceFeatureModel(**f.to_dict()) for f in gcp_scan.features],
-                actionable_features=[GCPServiceFeatureModel(**f.to_dict()) for f in gcp_scan.actionable_features],
-                module_resources=gcp_scan.module_resources,
-                summary=gcp_scan.summary,
-            )
-            run.log(
-                f"GCP service scan: {gcp_scan.actionable_count} actionable new GA features "
-                f"found for {gcp_scan.gcp_product}"
-            )
-            # Merge actionable GCP service features into the change_set as additional GAChanges
-            from backend.ga_workflow.ga_models import GAChange, ChangeType
-            for feat in gcp_scan.actionable_features:
-                ct = (ChangeType.NEW_RESOURCE if feat.terraform_impact == "new_resource"
-                      else ChangeType.NEW_ARGUMENT)
-                for res_type in (feat.terraform_resources or [f"google_{gcp_scan.gcp_product}_resource"]):
-                    change_set.changes.append(GAChange(
-                        change_type=ct,
-                        resource_type=res_type,
-                        attribute_name=feat.terraform_args[0] if feat.terraform_args else None,
-                        description=f"[GCP Service GA] {feat.feature_name}: {feat.description[:150]}",
-                        provider_version=change_set.ga_release.latest_ga_version,
-                        breaking=False,
-                        source_url=feat.source_url,
-                    ))
-            run.log(f"Merged {len(gcp_scan.actionable_features)} GCP service features into change set")
-    except Exception as e:
-        run.log(f"GCP service scan failed ({e}) — continuing with provider-only changes", level="warning")
+    # Filter to only changes not yet applied (incremental mode)
+    all_changes = change_set.changes
+    new_changes = filter_new_changes(all_changes, inc_state)
+    change_set.new_changes = new_changes
+    skipped = len(all_changes) - len(new_changes)
+    if skipped:
+        run.log(f"Incremental: skipping {skipped} already-applied change(s), {len(new_changes)} new")
 
-    if not change_set.ga_release.upgrade_required:
+    if not change_set.ga_release.upgrade_required and not new_changes:
         run.log("Module is already on the latest GA provider version. Nothing to do.")
         run.stage = WorkflowStage.DONE
         run.overall_success = True
@@ -161,23 +175,30 @@ async def run_ga_workflow(request: GAWorkflowRequest) -> WorkflowRun:
         return run
 
     # ────────────────────────────────────────────────────────────────────────
-    # Stage 1b — Scan GCP service for new GA features beyond provider changelog
+    # Stage 1b — Scan cloud service for new GA features (multi-cloud)
     # ────────────────────────────────────────────────────────────────────────
-    run.log("Stage 1b/7 — Scanning GCP service for new GA features")
+    provider_label = change_set.ga_release.cloud_provider.value if change_set.ga_release.cloud_provider else "cloud"
+    run.log(f"Stage 1b/7 — Scanning {provider_label} service for new GA features")
     try:
-        gcp_scan = await scan_gcp_service(repo_name=request.repo_name, run=run)
-        run.gcp_service_scan = gcp_scan
+        cloud_scan = await scan_gcp_service_features(repo_name=request.repo_name, run=run)
+        run.gcp_service_scan = cloud_scan
+
+        # Filter service features already seen
+        seen_features = set(inc_state.service_features_seen)
+        new_service_features = [f for f in cloud_scan.actionable_features
+                                 if f.feature_name not in seen_features]
         run.log(
-            f"GCP service scan: {gcp_scan.total_features} features, "
-            f"{gcp_scan.actionable_count} actionable gaps"
+            f"Service scan: {cloud_scan.total_features} features, "
+            f"{cloud_scan.actionable_count} actionable, "
+            f"{len(new_service_features)} not yet seen"
         )
     except Exception as e:
-        run.log(f"GCP service scan failed (non-critical): {e}", level="warning")
+        run.log(f"Cloud service scan failed (non-critical): {e}", level="warning")
 
     run.log(
         f"Upgrade: v{change_set.ga_release.current_version} → "
         f"v{change_set.ga_release.latest_ga_version} "
-        f"({len(change_set.changes)} changes, "
+        f"({len(new_changes)} new changes, "
         f"{change_set.ga_release.breaking_changes} breaking)"
     )
 
@@ -340,7 +361,7 @@ async def run_ga_workflow(request: GAWorkflowRequest) -> WorkflowRun:
         run.log(f"✅ {action_verb} PR #{pr_result.pr_number}: {pr_result.pr_url}")
 
     # ────────────────────────────────────────────────────────────────────────
-    # Finalise
+    # Finalise + persist incremental state
     # ────────────────────────────────────────────────────────────────────────
     run.stage = WorkflowStage.DONE
     run.overall_success = (
@@ -349,6 +370,20 @@ async def run_ga_workflow(request: GAWorkflowRequest) -> WorkflowRun:
         and pr_result.action.value != "failed"
     )
     run.completed_at = datetime.now(timezone.utc).isoformat()
+
+    # Persist applied changes so next run skips them (incremental mode)
+    if pr_result.action.value in ("created", "updated") and new_changes:
+        updated_state = mark_changes_applied(new_changes, inc_state)
+        updated_state.applied_provider_version = change_set.ga_release.latest_ga_version
+        # Also record service features seen this run
+        if run.gcp_service_scan:
+            seen = set(updated_state.service_features_seen)
+            for f in run.gcp_service_scan.actionable_features:
+                seen.add(f.feature_name)
+            updated_state.service_features_seen = list(seen)
+        save_incremental_state(updated_state)
+        run.log(f"Incremental state saved — {len(updated_state.applied_change_hashes)} total applied changes")
+
     run.log(
         f"{'✅ Workflow complete' if run.overall_success else '⚠️ Workflow complete with warnings'} "
         f"— PR: {pr_result.pr_url or '(none)'}",

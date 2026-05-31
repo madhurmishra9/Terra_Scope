@@ -43,7 +43,7 @@ const QUERY_TYPE_COLORS = {
 };
 const STAGE_LABELS = {
   idle:"Idle", detecting_ga:"Detecting GA release",
-  scanning_gcp_service:"Scanning GCP service",
+  scanning_gcp_service:"Scanning cloud service",
   analyzing_changes:"Analysing changes", creating_branch:"Creating branch",
   implementing_changes:"Implementing changes", validating_code:"Validating code",
   checking_pr:"Checking PR", creating_pr:"Creating PR",
@@ -410,11 +410,12 @@ function FeatureCard({ feature, idx }) {
   );
 }
 
-function GCPServiceScanPanel({ scan, loading, onScan }) {
+function GCPServiceScanPanel({ scan, loading, onScan, cloudProvider }) {
+  const cloudLabel = { google:"GCP", aws:"AWS", azurerm:"Azure" }[cloudProvider] || "Cloud";
   if (loading) return (
     <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:200, gap:12, color:"#484F58" }}>
       <div style={{ fontSize:24 }}>🔍</div>
-      <div style={{ fontSize:12 }}>Scanning GCP service for new GA features…</div>
+      <div style={{ fontSize:12 }}>Scanning {cloudLabel} service for new GA features…</div>
       <div style={{ display:"flex", gap:5 }}>
         {[0,1,2].map(i => <div key={i} style={{ width:6, height:6, borderRadius:"50%", background:"#FFA657", animation:`blink 1.2s ${i*0.2}s ease-in-out infinite` }} />)}
       </div>
@@ -424,17 +425,17 @@ function GCPServiceScanPanel({ scan, loading, onScan }) {
     <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:200, gap:10, color:"#484F58" }}>
       <div style={{ fontSize:24 }}>📡</div>
       <div style={{ fontSize:12, textAlign:"center", lineHeight:1.6, maxWidth:300 }}>
-        Scan the GCP service for new GA features not yet in this module.
+        Scan the {cloudLabel} service for new GA features not yet in this module.
       </div>
       <button onClick={onScan} style={{ background:"#1F6FEB22", border:"1px solid #1F6FEB44", borderRadius:6, color:"#58A6FF", fontSize:11.5, padding:"6px 16px", cursor:"pointer", fontFamily:"inherit" }}>
-        Scan GCP Service
+        Scan {cloudLabel} Service
       </button>
     </div>
   );
   return (
     <div>
       <div style={{ background:"#161B22", border:"1px solid #21262D", borderRadius:8, padding:"12px 16px", marginBottom:12 }}>
-        <div style={{ fontSize:11, color:"#484F58", marginBottom:6, textTransform:"uppercase", letterSpacing:"0.06em" }}>GCP Service Scan Summary</div>
+        <div style={{ fontSize:11, color:"#484F58", marginBottom:6, textTransform:"uppercase", letterSpacing:"0.06em" }}>{cloudLabel} Service Scan Summary</div>
         <div style={{ fontSize:12.5, color:"#C9D1D9", lineHeight:1.7 }}>{scan.summary}</div>
         <div style={{ display:"flex", gap:16, marginTop:10 }}>
           <div style={{ textAlign:"center" }}>
@@ -462,6 +463,425 @@ function GCPServiceScanPanel({ scan, loading, onScan }) {
       <button onClick={onScan} style={{ marginTop:12, background:"none", border:"1px solid #21262D", borderRadius:5, color:"#484F58", fontSize:10, padding:"4px 10px", cursor:"pointer", fontFamily:"inherit" }}>
         ⟳ Re-scan
       </button>
+    </div>
+  );
+}
+
+// ── Scenarios Panel ───────────────────────────────────────────────────────────
+
+const SCENARIO_STATUS_COLORS = {
+  loading:"#FFA657", parsing:"#FFA657", planning:"#58A6FF",
+  generating:"#D2A8FF", validating:"#FFA657", done:"#3FB950", error:"#F85149",
+};
+const SCENARIO_STATUS_LABELS = {
+  loading:"Loading", parsing:"Parsing", planning:"Planning",
+  generating:"Generating", validating:"Validating", done:"Done", error:"Error",
+};
+
+function ScenarioBadge({ ok, skipped, fixed, iterations }) {
+  if (skipped)  return <Badge label="SKIP" color="#8B949E" />;
+  if (!ok)      return <Badge label="FAIL" color="#F85149" />;
+  if (fixed)    return <Badge label={`FIXED (${iterations})`} color="#FFA657" />;
+  return        <Badge label="PASS" color="#3FB950" />;
+}
+
+function ScenarioCodeViewer({ files }) {
+  const fileList = Object.keys(files || {});
+  const [activeFile, setActiveFile] = useState(fileList[0] || "");
+  if (!fileList.length) return <div style={{ color:"#484F58", fontSize:11 }}>No files</div>;
+  return (
+    <div style={{ display:"flex", flexDirection:"column", height:"100%", border:"1px solid #21262D", borderRadius:6, overflow:"hidden" }}>
+      <div style={{ display:"flex", borderBottom:"1px solid #21262D", background:"#161B22", flexWrap:"wrap" }}>
+        {fileList.map(f => (
+          <button key={f} onClick={() => setActiveFile(f)} style={{
+            background: activeFile===f ? "#0D1117" : "none", border:"none",
+            cursor:"pointer", padding:"4px 10px", fontSize:10.5, fontFamily:"monospace",
+            color: activeFile===f ? "#58A6FF" : "#8B949E",
+            borderBottom: activeFile===f ? "2px solid #58A6FF" : "2px solid transparent",
+          }}>{f}</button>
+        ))}
+      </div>
+      <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+        <button onClick={() => navigator.clipboard.writeText(files[activeFile]||"")} style={{
+          position:"absolute", top:6, right:8, background:"#21262D", border:"none",
+          cursor:"pointer", color:"#8B949E", fontSize:10, padding:"2px 8px", borderRadius:3, zIndex:1,
+        }}>Copy</button>
+        <pre style={{
+          margin:0, padding:"12px 14px", fontSize:11, fontFamily:"monospace",
+          lineHeight:1.55, color:"#E6EDF3", background:"#0D1117",
+          overflowY:"auto", height:"100%", whiteSpace:"pre-wrap", wordBreak:"break-word",
+        }}>{files[activeFile]||""}</pre>
+      </div>
+    </div>
+  );
+}
+
+function ScenariosPanel() {
+  const [sourceType, setSourceType] = useState("github");
+  const [url,        setUrl]        = useState("");
+  const [localPath,  setLocalPath]  = useState("");
+  const [tag,        setTag]        = useState("");
+
+  const [session,    setSession]    = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState("");
+
+  const [selectedScenario, setSelectedScenario] = useState(null);
+
+  const handleStart = async () => {
+    setLoading(true); setError(""); setSession(null);
+    let createdSession = null;
+    try {
+      const body = { source_type: sourceType, url, path: localPath, tag: tag || null };
+      const s = await apiPost("/scenarios/start", body);
+      createdSession = s;
+      setSession(s);
+
+      // Load module source immediately
+      try {
+        const s2 = await apiPost(`/scenarios/${s.session_id}/set-source`, body);
+        setSession(s2);
+      } catch (e2) {
+        // Fetch the updated session to get backend error_message
+        try {
+          const sErr = await apiGet(`/scenarios/${s.session_id}`);
+          setSession(sErr);
+        } catch (_) {}
+        setError(e2.message);
+      }
+    } catch (e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const handleGenerate = async () => {
+    if (!session) return;
+    setLoading(true); setError("");
+    try {
+      await apiPost(`/scenarios/${session.session_id}/generate`, {});
+      // Poll until done
+      for (let i = 0; i < 180; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        const s = await apiGet(`/scenarios/${session.session_id}`);
+        setSession(s);
+        if (s.status === "done" || s.status === "error") break;
+      }
+    } catch (e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const handleRerun = async (scenarioName) => {
+    if (!session) return;
+    try {
+      await apiPost(`/scenarios/${session.session_id}/rerun/${scenarioName}`, {});
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const s = await apiGet(`/scenarios/${session.session_id}`);
+        setSession(s);
+        const vr = s.validation_results?.find(r => r.scenario === scenarioName);
+        if (vr) break;
+      }
+    } catch (e) { setError(e.message); }
+  };
+
+  const statusColor = session ? (SCENARIO_STATUS_COLORS[session.status] || "#484F58") : "#484F58";
+  const statusLabel = session ? (SCENARIO_STATUS_LABELS[session.status] || session.status) : "";
+  const validationMap = {};
+  (session?.validation_results || []).forEach(vr => { validationMap[vr.scenario] = vr; });
+
+  const activeScenario = selectedScenario && session?.generated_scenarios
+    ? session.generated_scenarios.find(g => g.name === selectedScenario)
+    : null;
+
+  return (
+    <div style={{ display:"flex", height:"100%", overflow:"hidden" }}>
+
+      {/* ── Left panel — source input ── */}
+      <div style={{ width:280, borderRight:"1px solid #21262D", display:"flex",
+        flexDirection:"column", background:"#161B22", flexShrink:0, overflowY:"auto" }}>
+        <div style={{ padding:"14px 14px 8px", borderBottom:"1px solid #21262D" }}>
+          <div style={{ fontSize:12, fontWeight:700, color:"#E6EDF3", marginBottom:10 }}>Module Source</div>
+          <select value={sourceType} onChange={e => setSourceType(e.target.value)} style={{
+            width:"100%", background:"#0D1117", border:"1px solid #21262D",
+            color:"#C9D1D9", padding:"5px 8px", borderRadius:4, fontSize:11.5,
+            fontFamily:"inherit", marginBottom:8,
+          }}>
+            <option value="github">GitHub URL</option>
+            <option value="local">Local Path</option>
+          </select>
+
+          {sourceType === "github" && (
+            <>
+              <input value={url} onChange={e => setUrl(e.target.value)}
+                placeholder="https://github.com/org/module" style={{
+                  width:"100%", boxSizing:"border-box",
+                  background:"#0D1117", border:"1px solid #21262D", color:"#C9D1D9",
+                  padding:"5px 8px", borderRadius:4, fontSize:11, fontFamily:"monospace", marginBottom:6,
+                }} />
+              <input value={tag} onChange={e => setTag(e.target.value)}
+                placeholder="Tag / branch (optional)" style={{
+                  width:"100%", boxSizing:"border-box",
+                  background:"#0D1117", border:"1px solid #21262D", color:"#C9D1D9",
+                  padding:"5px 8px", borderRadius:4, fontSize:11, fontFamily:"monospace", marginBottom:6,
+                }} />
+            </>
+          )}
+          {sourceType === "local" && (
+            <input value={localPath} onChange={e => setLocalPath(e.target.value)}
+              placeholder="./path/to/module" style={{
+                width:"100%", boxSizing:"border-box",
+                background:"#0D1117", border:"1px solid #21262D", color:"#C9D1D9",
+                padding:"5px 8px", borderRadius:4, fontSize:11, fontFamily:"monospace", marginBottom:6,
+              }} />
+          )}
+
+          <button onClick={handleStart} disabled={loading || (!url && !localPath)} style={{
+            width:"100%", background:"#1F6FEB", border:"none", color:"#fff",
+            padding:"7px 0", borderRadius:4, cursor:"pointer", fontSize:12,
+            opacity: (loading || (!url && !localPath)) ? 0.5 : 1,
+          }}>
+            {loading ? "Loading…" : "Load Module"}
+          </button>
+        </div>
+
+        {/* Session status */}
+        {session && (
+          <div style={{ padding:"10px 14px", borderBottom:"1px solid #21262D" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
+              <span style={{ width:7, height:7, borderRadius:"50%", background:statusColor, flexShrink:0 }} />
+              <span style={{ fontSize:11, color:statusColor }}>{statusLabel}</span>
+            </div>
+            {session.module_spec && (
+              <div style={{ fontSize:10, color:"#8B949E", lineHeight:1.7 }}>
+                <div>Provider: <span style={{ color:"#C9D1D9" }}>{session.module_spec.provider}</span></div>
+                <div>Variables: <span style={{ color:"#C9D1D9" }}>{session.module_spec.variables?.length || 0}</span></div>
+                <div>Resources: <span style={{ color:"#C9D1D9" }}>{session.module_spec.resources?.length || 0}</span></div>
+                <div>Feature gates: <span style={{ color:"#C9D1D9" }}>{session.module_spec.feature_gates?.length || 0}</span></div>
+              </div>
+            )}
+            {session.status === "planning" && (
+              <button onClick={handleGenerate} disabled={loading} style={{
+                width:"100%", marginTop:8, background:"#238636", border:"none",
+                color:"#fff", padding:"7px 0", borderRadius:4, cursor:"pointer", fontSize:12,
+                opacity: loading ? 0.5 : 1,
+              }}>
+                {loading ? "Running pipeline…" : "Generate Scenarios"}
+              </button>
+            )}
+            {session.status === "error" && (
+              <div style={{ marginTop:6, fontSize:10, color:"#F85149", wordBreak:"break-word" }}>
+                {session.error_message}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Scenario list */}
+        {(session?.generated_scenarios || []).length > 0 && (
+          <div style={{ flex:1, overflowY:"auto" }}>
+            <div style={{ padding:"6px 14px 4px", fontSize:10, color:"#484F58",
+              textTransform:"uppercase", letterSpacing:"0.06em" }}>
+              Scenarios ({session.generated_scenarios.length})
+            </div>
+            {session.generated_scenarios.map(gs => {
+              const vr = validationMap[gs.name];
+              const isActive = selectedScenario === gs.name;
+              return (
+                <button key={gs.name} onClick={() => setSelectedScenario(isActive ? null : gs.name)} style={{
+                  width:"100%", background: isActive ? "#0D1117" : "transparent",
+                  border:"none", cursor:"pointer", padding:"7px 14px",
+                  borderLeft:`2px solid ${isActive ? "#58A6FF" : "transparent"}`,
+                  textAlign:"left", borderBottom:"1px solid #21262D11",
+                }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:2 }}>
+                    {vr ? <ScenarioBadge ok={vr.ok} skipped={vr.skipped} fixed={vr.fixed} iterations={vr.iterations} />
+                         : <Badge label="..." color="#484F58" />}
+                    <span style={{ fontFamily:"monospace", fontSize:10.5, color: isActive ? "#58A6FF" : "#C9D1D9" }}>
+                      {gs.name}
+                    </span>
+                  </div>
+                  <div style={{ fontSize:10, color:"#484F58", paddingLeft:0, lineHeight:1.4 }}>
+                    {gs.based_on_scenario?.description?.slice(0, 50)}
+                  </div>
+                  {vr && !vr.ok && !vr.skipped && (
+                    <button onClick={e => { e.stopPropagation(); handleRerun(gs.name); }} style={{
+                      marginTop:4, background:"#161B22", border:"1px solid #21262D",
+                      color:"#8B949E", fontSize:9.5, padding:"2px 8px", borderRadius:3,
+                      cursor:"pointer", fontFamily:"inherit",
+                    }}>↺ Re-run</button>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ── Right panel ── */}
+      <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+        {/* State display / progress */}
+        {session && !activeScenario && (
+          <div style={{ padding:"14px 20px", borderBottom:"1px solid #21262D",
+            background:"#0D1117", flexShrink:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
+              <span style={{ fontSize:13, fontWeight:700, color:"#E6EDF3" }}>
+                {session.module_spec?.module_name || "Module"}
+              </span>
+              <span style={{ fontSize:11, padding:"2px 8px", borderRadius:3,
+                background: statusColor + "22", color: statusColor }}>
+                {statusLabel}
+              </span>
+            </div>
+            {["loading","parsing","planning","generating","validating"].includes(session.status) && (
+              <div style={{ height:3, background:"#21262D", borderRadius:2, overflow:"hidden" }}>
+                <div style={{
+                  height:"100%", borderRadius:2,
+                  background: statusColor,
+                  width: {loading:15,parsing:30,planning:45,generating:65,validating:85}[session.status]+"%",
+                  transition:"width 0.5s ease",
+                }} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Coverage report */}
+        {session?.coverage_report && !activeScenario && (
+          <div style={{ flex:1, overflowY:"auto", padding:"16px 20px" }}>
+            <div style={{ fontSize:12, fontWeight:700, color:"#E6EDF3", marginBottom:10 }}>Coverage Report</div>
+            <div style={{ display:"flex", gap:12, marginBottom:12 }}>
+              {[
+                { label:"Total",  val:session.coverage_report.total_scenarios, color:"#8B949E" },
+                { label:"Passed", val:session.coverage_report.passed_scenarios, color:"#3FB950" },
+                { label:"Failed", val:session.coverage_report.total_scenarios - session.coverage_report.passed_scenarios, color:"#F85149" },
+              ].map(({ label, val, color }) => (
+                <div key={label} style={{ background:"#161B22", border:"1px solid #21262D",
+                  borderRadius:6, padding:"8px 14px", textAlign:"center", minWidth:70 }}>
+                  <div style={{ fontSize:20, fontWeight:700, color }}>{val}</div>
+                  <div style={{ fontSize:10, color:"#484F58" }}>{label}</div>
+                </div>
+              ))}
+            </div>
+            {session.coverage_report.uncovered_gates?.length > 0 && (
+              <div style={{ background:"#FFA65711", border:"1px solid #FFA65733",
+                borderRadius:6, padding:"8px 12px", marginBottom:10 }}>
+                <div style={{ fontSize:11, fontWeight:600, color:"#FFA657", marginBottom:4 }}>
+                  ⚠ Uncovered Feature Gates
+                </div>
+                {session.coverage_report.uncovered_gates.map(g => (
+                  <div key={g} style={{ fontSize:11, fontFamily:"monospace", color:"#C9D1D9" }}>• {g}</div>
+                ))}
+              </div>
+            )}
+            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
+              <thead>
+                <tr style={{ borderBottom:"1px solid #21262D" }}>
+                  {["Scenario","Pass","Variables Set","Gates"].map(h => (
+                    <th key={h} style={{ padding:"4px 8px", color:"#484F58",
+                      textAlign:"left", fontWeight:600, fontSize:10.5 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(session.coverage_report.per_scenario || []).map(sc => (
+                  <tr key={sc.scenario_name} style={{ borderBottom:"1px solid #21262D22" }}>
+                    <td style={{ padding:"4px 8px", fontFamily:"monospace", color:"#C9D1D9", fontSize:10.5 }}>
+                      {sc.scenario_name}
+                    </td>
+                    <td style={{ padding:"4px 8px" }}>
+                      <span style={{ color: sc.passed ? "#3FB950" : "#F85149" }}>
+                        {sc.passed ? "✅" : "❌"}
+                      </span>
+                    </td>
+                    <td style={{ padding:"4px 8px", color:"#8B949E", fontSize:10.5 }}>
+                      {sc.variables_set?.slice(0,3).join(", ") || "(none)"}
+                    </td>
+                    <td style={{ padding:"4px 8px", color:"#8B949E", fontSize:10.5 }}>
+                      {sc.features_exercised?.join(", ") || "(none)"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {session.output_dir && (
+              <div style={{ marginTop:12, fontSize:10.5, color:"#484F58" }}>
+                Output: <span style={{ fontFamily:"monospace", color:"#8B949E" }}>{session.output_dir}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Scenario code viewer */}
+        {activeScenario && (
+          <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:16 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10, flexShrink:0 }}>
+              <button onClick={() => setSelectedScenario(null)} style={{
+                background:"none", border:"1px solid #21262D", color:"#8B949E",
+                cursor:"pointer", padding:"3px 10px", borderRadius:4, fontSize:11, fontFamily:"inherit",
+              }}>← Back</button>
+              <span style={{ fontSize:12, fontWeight:700, color:"#E6EDF3", fontFamily:"monospace" }}>
+                {activeScenario.name}
+              </span>
+              {validationMap[activeScenario.name] && (
+                <ScenarioBadge
+                  ok={validationMap[activeScenario.name].ok}
+                  skipped={validationMap[activeScenario.name].skipped}
+                  fixed={validationMap[activeScenario.name].fixed}
+                  iterations={validationMap[activeScenario.name].iterations}
+                />
+              )}
+            </div>
+            {validationMap[activeScenario.name]?.stderr && (
+              <div style={{ background:"#F8514911", border:"1px solid #F8514933",
+                borderRadius:6, padding:"8px 12px", marginBottom:10, flexShrink:0 }}>
+                <div style={{ fontSize:10, color:"#F85149", fontWeight:600, marginBottom:4 }}>Validation Error</div>
+                <pre style={{ margin:0, fontSize:10.5, color:"#F85149", whiteSpace:"pre-wrap",
+                  fontFamily:"monospace", maxHeight:80, overflowY:"auto" }}>
+                  {validationMap[activeScenario.name].stderr}
+                </pre>
+              </div>
+            )}
+            <div style={{ flex:1, overflow:"hidden" }}>
+              <ScenarioCodeViewer files={activeScenario.files} />
+            </div>
+          </div>
+        )}
+
+        {/* Module-loaded guidance — before Generate is clicked */}
+        {session?.status === "planning" && !activeScenario && !session?.coverage_report && (
+          <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <div style={{ textAlign:"center", maxWidth:380 }}>
+              <div style={{ fontSize:28, marginBottom:10 }}>✅</div>
+              <div style={{ fontSize:13, color:"#E6EDF3", fontWeight:600, marginBottom:6 }}>
+                Module Loaded
+              </div>
+              <div style={{ fontSize:11.5, color:"#8B949E", lineHeight:1.8, marginBottom:16 }}>
+                <div style={{ marginBottom:4 }}>
+                  <span style={{ color:"#C9D1D9" }}>{session.module_spec?.provider || "unknown"}</span> provider ·{" "}
+                  <span style={{ color:"#C9D1D9" }}>{session.module_spec?.variables?.length || 0}</span> variables ·{" "}
+                  <span style={{ color:"#C9D1D9" }}>{session.module_spec?.resources?.length || 0}</span> resources
+                </div>
+                Click <strong style={{ color:"#3FB950" }}>Generate Scenarios</strong> in the left panel<br />
+                to build a full test matrix for this module.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!session && !loading && (
+          <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <div style={{ textAlign:"center", opacity:0.5 }}>
+              <div style={{ fontSize:32, marginBottom:10 }}>🧪</div>
+              <div style={{ fontSize:14, color:"#8B949E", marginBottom:6 }}>Scenario Generator</div>
+              <div style={{ fontSize:11.5, color:"#484F58", lineHeight:1.7 }}>
+                Load a Terraform module to generate and validate<br />
+                a full matrix of test configurations.
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -524,6 +944,12 @@ function GAWorkflowPanel({ repo, health }) {
         {detectLoading && <div style={{ fontSize:11, color:"#484F58" }}>Checking provider version…</div>}
         {gaDetect && !detectLoading && (
           <div style={{ display:"flex", gap:16, alignItems:"center", flexWrap:"wrap" }}>
+            {gaDetect.cloud_provider && (
+              <Badge
+                label={PROVIDER_LABELS[gaDetect.cloud_provider] || gaDetect.cloud_provider.toUpperCase()}
+                color={PROVIDER_COLORS[gaDetect.cloud_provider] || "#5F6368"}
+              />
+            )}
             <div><div style={{ fontSize:10, color:"#484F58" }}>Current</div><div style={{ fontFamily:"monospace", fontSize:12, color:"#C9D1D9" }}>v{gaDetect.current_version}</div></div>
             <div style={{ fontSize:14, color: gaDetect.upgrade_required ? "#FFA657" : "#3FB950" }}>→</div>
             <div><div style={{ fontSize:10, color:"#484F58" }}>Latest GA</div><div style={{ fontFamily:"monospace", fontSize:12, color: gaDetect.upgrade_required ? "#FFA657" : "#3FB950", fontWeight:700 }}>v{gaDetect.latest_ga_version}</div></div>
@@ -534,7 +960,7 @@ function GAWorkflowPanel({ repo, health }) {
         )}
       </div>
       <div style={{ display:"flex", borderBottom:"1px solid #21262D", background:"#0D1117", flexShrink:0 }}>
-        {[{key:"workflow",label:"🔄 GA Workflow"},{key:"gcp_scan",label:"📡 GCP Scan"}].map(t => (
+        {[{key:"workflow",label:"🔄 GA Workflow"},{key:"cloud_scan",label:"📡 Cloud Scan"}].map(t => (
           <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
             background:"none", border:"none", cursor:"pointer", padding:"9px 18px", fontSize:11.5,
             fontFamily:"inherit", fontWeight: activeTab===t.key ? 600 : 400,
@@ -585,10 +1011,42 @@ function GAWorkflowPanel({ repo, health }) {
                 </div>
                 <div style={{ background:"#161B22", border:"1px solid #21262D", borderRadius:8, padding:"12px 16px", marginBottom:16 }}>
                   <div style={{ fontSize:10, color:"#484F58", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:10 }}>Pipeline Stages</div>
-                  {[["detecting_ga","1. Detect GA release"],["scanning_gcp_service","1b. Scan GCP service"],["analyzing_changes","2. Analyse changes"],["creating_branch","3. Create branch"],["implementing_changes","4. Implement changes"],["validating_code","5. Validate code"],["checking_pr","6. Check provider compat"],["creating_pr","7. Create / Update PR"]].map(([key,label]) => (
+                  {[["detecting_ga","1. Detect GA release"],["scanning_gcp_service","1b. Scan cloud service"],["analyzing_changes","2. Analyse changes"],["creating_branch","3. Create branch"],["implementing_changes","4. Implement changes"],["validating_code","5. Validate code"],["checking_pr","6. Check provider compat"],["creating_pr","7. Create / Update PR"]].map(([key,label]) => (
                     <StageRow key={key} stageKey={key} currentStage={workflowRun.stage} label={label} done={isDone} />
                   ))}
                 </div>
+                {workflowRun.change_set?.changes?.length > 0 && (
+                  <details style={{ marginBottom:16 }}>
+                    <summary style={{ fontSize:11, color:"#484F58", cursor:"pointer", userSelect:"none", marginBottom:6 }}>
+                      Changes detected ({workflowRun.change_set.changes.length})
+                    </summary>
+                    <div style={{ marginTop:6, display:"flex", flexDirection:"column", gap:4 }}>
+                      {workflowRun.change_set.changes.map((c, i) => {
+                        const reasonLabel = c.breaking_reason ? c.breaking_reason.replace(/_/g, " ") : null;
+                        return (
+                          <div key={i} style={{ background:"#161B22", border:"1px solid #21262D", borderRadius:6, padding:"8px 12px" }}>
+                            <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom: c.migration_note ? 4 : 0 }}>
+                              <span style={{ fontFamily:"monospace", fontSize:11, color:"#D2A8FF" }}>
+                                {c.resource_type}{c.attribute ? `.${c.attribute}` : ""}
+                              </span>
+                              <Badge label={c.change_type} color="#58A6FF" />
+                              {c.breaking ? (
+                                <Badge label={reasonLabel ? `BREAKING: ${reasonLabel}` : "BREAKING"} color="#F85149" />
+                              ) : (
+                                <Badge label="safe" color="#3FB950" />
+                              )}
+                            </div>
+                            {c.migration_note && (
+                              <div style={{ fontSize:10.5, color:"#8B949E", marginTop:3, lineHeight:1.5 }}>
+                                {c.migration_note}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </details>
+                )}
                 <details>
                   <summary style={{ fontSize:11, color:"#484F58", cursor:"pointer", userSelect:"none", marginBottom:6 }}>
                     Pipeline logs ({workflowRun.logs?.length || 0})
@@ -606,7 +1064,7 @@ function GAWorkflowPanel({ repo, health }) {
             )}
           </>
         )}
-        {activeTab==="gcp_scan" && <GCPServiceScanPanel scan={scanResult} loading={scanLoading} onScan={handleScanGCP} />}
+        {activeTab==="cloud_scan" && <GCPServiceScanPanel scan={scanResult} loading={scanLoading} onScan={handleScanGCP} cloudProvider={gaDetect?.cloud_provider} />}
       </div>
     </div>
   );
@@ -1090,7 +1548,7 @@ function CurationPanel({ repos, health }) {
   const [repoName, setRepoName] = useState("");
   const [newTag, setNewTag] = useState("");
   const [description, setDescription] = useState("");
-  const [sourceType, setSourceType] = useState("none");
+  const [sourceType, setSourceType] = useState("github");
   const [githubUrl, setGithubUrl] = useState("");
   const [githubTag, setGithubTag] = useState("");
   const [localPath, setLocalPath] = useState("");
@@ -1421,6 +1879,358 @@ function CurationPanel({ repos, health }) {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  TROUBLESHOOT PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+const SEVERITY_COLORS = { error:"#F85149", warning:"#FFA657", info:"#58A6FF" };
+const SEVERITY_ICONS  = { error:"✗", warning:"⚠", info:"ℹ" };
+const CATEGORY_COLORS = {
+  syntax:"#F85149", type:"#FFA657", undefined_ref:"#FF7B72",
+  missing_attr:"#FFA657", deprecated:"#D2A8FF", security:"#F85149",
+  logic:"#58A6FF", best_practice:"#3FB950", provider:"#79C0FF",
+};
+
+function IssueRow({ issue, idx }) {
+  const [exp, setExp] = useState(false);
+  const sevColor = SEVERITY_COLORS[issue.severity] || "#8B949E";
+  const catColor = CATEGORY_COLORS[issue.category] || "#8B949E";
+  return (
+    <div style={{ background:"#161B22", border:`1px solid ${sevColor}22`,
+      borderLeft:`3px solid ${sevColor}`, borderRadius:6, marginBottom:6, overflow:"hidden" }}>
+      <div onClick={() => setExp(!exp)} style={{ padding:"9px 12px", cursor:"pointer",
+        display:"flex", alignItems:"flex-start", gap:10 }}>
+        <span style={{ color:sevColor, fontSize:13, flexShrink:0, marginTop:1 }}>
+          {SEVERITY_ICONS[issue.severity] || "•"}
+        </span>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginBottom:3 }}>
+            <Badge label={issue.category.replace(/_/g," ")} color={catColor} />
+            {issue.file_path && (
+              <span style={{ fontFamily:"monospace", fontSize:10, color:"#484F58" }}>
+                {issue.file_path}{issue.line ? `:${issue.line}` : ""}
+              </span>
+            )}
+            {issue.resource_type && (
+              <span style={{ fontFamily:"monospace", fontSize:10, color:"#D2A8FF",
+                background:"#D2A8FF11", padding:"1px 5px", borderRadius:3 }}>
+                {issue.resource_type}
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize:12, color:"#E6EDF3", lineHeight:1.5 }}>{issue.message}</div>
+        </div>
+        <span style={{ color:"#484F58", fontSize:11, flexShrink:0 }}>{exp ? "▲" : "▼"}</span>
+      </div>
+      {exp && issue.suggestion && (
+        <div style={{ borderTop:`1px solid ${sevColor}22`, padding:"8px 12px 10px 35px",
+          background:"#0D1117" }}>
+          <div style={{ fontSize:10, color:"#484F58", textTransform:"uppercase",
+            letterSpacing:"0.06em", marginBottom:4 }}>Suggestion</div>
+          <div style={{ fontSize:11.5, color:"#8B949E", lineHeight:1.6 }}>{issue.suggestion}</div>
+          {issue.fixed_in_version && (
+            <div style={{ marginTop:6, fontSize:10.5, color:"#3FB950" }}>
+              Fixed in provider v{issue.fixed_in_version}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VersionRecommendCard({ rec }) {
+  if (!rec) return null;
+  const same = rec.current_version === rec.recommended_version;
+  const safe = rec.safe_to_upgrade;
+  const color = same ? "#3FB950" : safe ? "#58A6FF" : "#FFA657";
+  return (
+    <div style={{ background:"#161B22", border:`1px solid ${color}33`,
+      borderRadius:8, padding:"14px 16px", marginBottom:16 }}>
+      <div style={{ fontSize:10, color:"#484F58", textTransform:"uppercase",
+        letterSpacing:"0.06em", marginBottom:10 }}>Version Recommendation</div>
+      <div style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap", marginBottom:10 }}>
+        <div style={{ textAlign:"center" }}>
+          <div style={{ fontSize:10, color:"#484F58", marginBottom:2 }}>Current</div>
+          <div style={{ fontFamily:"monospace", fontSize:13, color:"#C9D1D9" }}>v{rec.current_version}</div>
+        </div>
+        {!same && <>
+          <div style={{ fontSize:18, color }}>{safe ? "→" : "⚠ →"}</div>
+          <div style={{ textAlign:"center" }}>
+            <div style={{ fontSize:10, color:"#484F58", marginBottom:2 }}>Recommended</div>
+            <div style={{ fontFamily:"monospace", fontSize:13, color, fontWeight:700 }}>v{rec.recommended_version}</div>
+          </div>
+        </>}
+        {same
+          ? <Badge label="ALREADY LATEST" color="#3FB950" />
+          : safe
+            ? <Badge label="SAFE UPGRADE" color="#58A6FF" />
+            : <Badge label={`${rec.breaking_changes} BREAKING`} color="#FFA657" />
+        }
+      </div>
+      <div style={{ fontSize:11.5, color:"#8B949E", lineHeight:1.6, marginBottom: rec.fixes_in_version?.length ? 10 : 0 }}>
+        {rec.reason}
+      </div>
+      {rec.fixes_in_version?.length > 0 && (
+        <div>
+          <div style={{ fontSize:10, color:"#484F58", textTransform:"uppercase",
+            letterSpacing:"0.06em", marginBottom:5 }}>Relevant fixes in v{rec.recommended_version}</div>
+          <ul style={{ margin:0, paddingLeft:16, listStyle:"disc" }}>
+            {rec.fixes_in_version.slice(0,6).map((fix, i) => (
+              <li key={i} style={{ fontSize:11, color:"#8B949E", lineHeight:1.6 }}>{fix}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {rec.changelog_url && (
+        <a href={rec.changelog_url} target="_blank" rel="noreferrer"
+          style={{ display:"inline-block", marginTop:8, fontSize:10, color:"#58A6FF" }}>
+          View full changelog ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
+function TroubleshootPanel({ repos, selectedRepo }) {
+  const [repoName, setRepoName]     = useState(selectedRepo?.name || "");
+  const [tag, setTag]               = useState("");
+  const [problem, setProblem]       = useState("");
+  const [loading, setLoading]       = useState(false);
+  const [result, setResult]         = useState(null);
+  const [error, setError]           = useState(null);
+  const [tags, setTags]             = useState([]);
+  const [filterSev, setFilterSev]   = useState("all");
+
+  // Sync repo selector when sidebar selection changes
+  useEffect(() => {
+    if (selectedRepo?.name) setRepoName(selectedRepo.name);
+  }, [selectedRepo?.name]);
+
+  // Load tags when repo changes
+  useEffect(() => {
+    if (!repoName) return;
+    apiGet(`/repos/${repoName}/tags`).then(d => {
+      const tagList = (d.tags || d || []).map(t => typeof t === "string" ? t : t.name).filter(Boolean);
+      setTags(tagList);
+      if (!tag && tagList.length > 0) setTag(tagList[0]);
+    }).catch(() => setTags([]));
+  }, [repoName]);
+
+  const handleScan = async () => {
+    if (!repoName) return;
+    setLoading(true); setResult(null); setError(null);
+    try {
+      const res = await apiPost("/troubleshoot", {
+        repo_name: repoName,
+        tag: tag || null,
+        problem_description: problem,
+      });
+      setResult(res);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredIssues = result?.issues?.filter(i =>
+    filterSev === "all" || i.severity === filterSev
+  ) || [];
+
+  const errCount  = result?.issues?.filter(i => i.severity === "error").length   || 0;
+  const warnCount = result?.issues?.filter(i => i.severity === "warning").length || 0;
+  const infoCount = result?.issues?.filter(i => i.severity === "info").length    || 0;
+
+  return (
+    <div style={{ display:"flex", height:"100%", overflow:"hidden" }}>
+      {/* ── Config panel ── */}
+      <div style={{ width:280, borderRight:"1px solid #21262D", background:"#161B22",
+        display:"flex", flexDirection:"column", flexShrink:0, overflowY:"auto" }}>
+        <div style={{ padding:"14px 16px", borderBottom:"1px solid #21262D" }}>
+          <div style={{ fontSize:12, fontWeight:700, color:"#E6EDF3", marginBottom:12 }}>
+            🔍 Troubleshoot Module
+          </div>
+
+          {/* Repo selector */}
+          <div style={{ marginBottom:10 }}>
+            <div style={{ fontSize:10, color:"#484F58", marginBottom:4, textTransform:"uppercase", letterSpacing:"0.05em" }}>Repository</div>
+            <select value={repoName} onChange={e => { setRepoName(e.target.value); setTag(""); setResult(null); }}
+              style={{ width:"100%", background:"#0D1117", border:"1px solid #21262D", borderRadius:4,
+                color:"#C9D1D9", fontSize:11, padding:"5px 8px", fontFamily:"inherit" }}>
+              <option value="">— select repo —</option>
+              {repos.map(r => <option key={r.name} value={r.name}>{r.display_name || r.name}</option>)}
+            </select>
+          </div>
+
+          {/* Tag selector */}
+          <div style={{ marginBottom:10 }}>
+            <div style={{ fontSize:10, color:"#484F58", marginBottom:4, textTransform:"uppercase", letterSpacing:"0.05em" }}>Tag / Branch</div>
+            {tags.length > 0 ? (
+              <select value={tag} onChange={e => { setTag(e.target.value); setResult(null); }}
+                style={{ width:"100%", background:"#0D1117", border:"1px solid #21262D", borderRadius:4,
+                  color:"#C9D1D9", fontSize:11, padding:"5px 8px", fontFamily:"inherit" }}>
+                <option value="">— latest —</option>
+                {tags.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            ) : (
+              <input value={tag} onChange={e => setTag(e.target.value)} placeholder="main"
+                style={{ width:"100%", background:"#0D1117", border:"1px solid #21262D", borderRadius:4,
+                  color:"#C9D1D9", fontSize:11, padding:"5px 8px", fontFamily:"monospace", boxSizing:"border-box" }} />
+            )}
+          </div>
+
+          {/* Problem description */}
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:10, color:"#484F58", marginBottom:4, textTransform:"uppercase", letterSpacing:"0.05em" }}>
+              Problem / Error (optional)
+            </div>
+            <textarea value={problem} onChange={e => setProblem(e.target.value)}
+              rows={4} placeholder={"e.g. 'terraform apply fails with 403'\nor paste an error message…"}
+              style={{ width:"100%", background:"#0D1117", border:"1px solid #21262D", borderRadius:4,
+                color:"#C9D1D9", fontSize:11, padding:"6px 8px", fontFamily:"inherit",
+                resize:"vertical", boxSizing:"border-box" }} />
+          </div>
+
+          <button onClick={handleScan} disabled={!repoName || loading}
+            style={{ width:"100%", background: repoName ? "#1F6FEB22" : "#21262D",
+              border:`1px solid ${repoName ? "#1F6FEB66" : "#21262D"}`,
+              borderRadius:6, color: repoName ? "#58A6FF" : "#484F58",
+              fontSize:12, padding:"8px", cursor: repoName ? "pointer" : "not-allowed",
+              fontFamily:"inherit", fontWeight:600 }}>
+            {loading ? "Scanning…" : "🔍 Scan Module"}
+          </button>
+        </div>
+
+        {/* Scanned files list */}
+        {result?.scanned_files?.length > 0 && (
+          <div style={{ padding:"10px 16px" }}>
+            <div style={{ fontSize:10, color:"#484F58", textTransform:"uppercase",
+              letterSpacing:"0.06em", marginBottom:6 }}>Scanned files</div>
+            {result.scanned_files.map((f, i) => (
+              <div key={i} style={{ fontSize:10.5, color:"#8B949E", fontFamily:"monospace",
+                padding:"2px 0", borderBottom:"1px solid #21262D11" }}>{f}</div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Results panel ── */}
+      <div style={{ flex:1, overflowY:"auto", padding:"16px 20px" }}>
+        {!result && !loading && !error && (
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+            justifyContent:"center", height:"100%", gap:12, opacity:0.5 }}>
+            <div style={{ fontSize:32 }}>🔍</div>
+            <div style={{ fontSize:13, color:"#8B949E", textAlign:"center", lineHeight:1.7 }}>
+              Select a repo and tag, optionally describe the problem,<br />
+              then click <strong>Scan Module</strong>.
+            </div>
+            <div style={{ fontSize:11, color:"#484F58", textAlign:"center", lineHeight:1.7, maxWidth:340 }}>
+              Detects syntax errors · undefined references · security issues ·
+              deprecated usage · logic bugs · and suggests a safe upgrade path.
+            </div>
+          </div>
+        )}
+
+        {loading && (
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+            justifyContent:"center", height:200, gap:12 }}>
+            <div style={{ fontSize:24 }}>⚙️</div>
+            <div style={{ fontSize:12, color:"#FFA657" }}>Scanning module…</div>
+            <div style={{ fontSize:11, color:"#484F58" }}>Running static analysis + LLM review + version check</div>
+            <div style={{ display:"flex", gap:5, marginTop:4 }}>
+              {[0,1,2].map(i => (
+                <div key={i} style={{ width:6, height:6, borderRadius:"50%", background:"#FFA657",
+                  animation:`blink 1.2s ${i*0.2}s ease-in-out infinite` }} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div style={{ background:"#F8514911", border:"1px solid #F8514933", borderRadius:8,
+            padding:"12px 16px", color:"#F85149", fontSize:12 }}>
+            ✗ {error}
+          </div>
+        )}
+
+        {result && (
+          <>
+            {/* Summary banner */}
+            <div style={{ background: result.error_count ? "#F8514911" : result.warning_count ? "#FFA65711" : "#3FB95011",
+              border:`1px solid ${result.error_count ? "#F8514933" : result.warning_count ? "#FFA65733" : "#3FB95033"}`,
+              borderRadius:8, padding:"12px 16px", marginBottom:16 }}>
+              <div style={{ fontSize:12.5, color:"#E6EDF3", marginBottom:6 }}>{result.summary}</div>
+              <div style={{ display:"flex", gap:12, flexWrap:"wrap" }}>
+                <div style={{ textAlign:"center" }}>
+                  <div style={{ fontSize:18, fontWeight:700, color:"#F85149" }}>{result.error_count}</div>
+                  <div style={{ fontSize:10, color:"#484F58" }}>Errors</div>
+                </div>
+                <div style={{ textAlign:"center" }}>
+                  <div style={{ fontSize:18, fontWeight:700, color:"#FFA657" }}>{result.warning_count}</div>
+                  <div style={{ fontSize:10, color:"#484F58" }}>Warnings</div>
+                </div>
+                <div style={{ textAlign:"center" }}>
+                  <div style={{ fontSize:18, fontWeight:700, color:"#58A6FF" }}>{result.info_count}</div>
+                  <div style={{ fontSize:10, color:"#484F58" }}>Info</div>
+                </div>
+                <div style={{ fontSize:10, color:"#484F58", alignSelf:"flex-end", marginLeft:"auto" }}>
+                  {result.tag} · {new Date(result.scan_date).toLocaleTimeString()}
+                </div>
+              </div>
+            </div>
+
+            {/* Version recommendation */}
+            <VersionRecommendCard rec={result.version_recommendation} />
+
+            {/* Issue filter */}
+            {result.issues?.length > 0 && (
+              <>
+                <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
+                  {[
+                    ["all",     "All",      "#8B949E"],
+                    ["error",   `Errors (${errCount})`,   "#F85149"],
+                    ["warning", `Warnings (${warnCount})`, "#FFA657"],
+                    ["info",    `Info (${infoCount})`,    "#58A6FF"],
+                  ].map(([key, label, color]) => (
+                    <button key={key} onClick={() => setFilterSev(key)}
+                      style={{ background: filterSev===key ? color+"22" : "transparent",
+                        border:`1px solid ${filterSev===key ? color+"66" : "#21262D"}`,
+                        borderRadius:4, color: filterSev===key ? color : "#484F58",
+                        fontSize:11, padding:"3px 10px", cursor:"pointer", fontFamily:"inherit" }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <div>
+                  {filteredIssues.map((issue, i) => (
+                    <IssueRow key={i} issue={issue} idx={i} />
+                  ))}
+                  {filteredIssues.length === 0 && (
+                    <div style={{ fontSize:11, color:"#484F58", textAlign:"center", padding:"20px 0" }}>
+                      No {filterSev} issues.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {result.issues?.length === 0 && (
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+                gap:10, padding:"32px 0", color:"#3FB950" }}>
+                <div style={{ fontSize:28 }}>✓</div>
+                <div style={{ fontSize:13 }}>No issues found — module looks healthy!</div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function TerraScope() {
   const [repos, setRepos] = useState([]);
@@ -1494,7 +2304,7 @@ export default function TerraScope() {
         @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 currentColor} 50%{box-shadow:0 0 0 4px transparent} }
         textarea:focus,input:focus,select:focus { outline:1px solid #1F6FEB44; }
         button:hover { opacity:.85; }
-        select { appearance:none; }
+        select { appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238B949E'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 8px center; padding-right:24px !important; }
         details summary::-webkit-details-marker { display:none; }
       `}</style>
 
@@ -1507,16 +2317,18 @@ export default function TerraScope() {
             display:"flex", alignItems:"center", justifyContent:"center", fontSize:12 }}>🔭</div>
           <span style={{ fontWeight:700, fontSize:14, color:"#E6EDF3" }}>TerraScope</span>
           <span style={{ fontSize:10, color:"#484F58", padding:"1px 5px",
-            background:"#21262D", borderRadius:3 }}>v2.1</span>
+            background:"#21262D", borderRadius:3 }}>v2.3</span>
         </div>
 
         {/* View toggle */}
         <div style={{ display:"flex", gap:2, background:"#0D1117",
           borderRadius:6, padding:3, border:"1px solid #21262D" }}>
           {[
-            { key:"chat",   label:"💬 Chat" },
-            { key:"curate", label:"🔧 Curate" },
-            { key:"ga",     label:"🚀 GA Workflow" },
+            { key:"chat",        label:"💬 Chat" },
+            { key:"curate",      label:"🔧 Curate" },
+            { key:"ga",          label:"🚀 GA Workflow" },
+            { key:"scenarios",   label:"🧪 Scenarios" },
+            { key:"troubleshoot", label:"🔍 Troubleshoot" },
           ].map(v => (
             <button key={v.key} onClick={() => setMainView(v.key)} style={{
               background: mainView===v.key ? "#161B22" : "transparent",
@@ -1565,7 +2377,7 @@ export default function TerraScope() {
       <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
 
         {/* ── Sidebar (only for chat + ga views) ── */}
-        {mainView !== "curate" && (
+        {mainView !== "curate" && mainView !== "scenarios" && (
           <div style={{ width:220, borderRight:"1px solid #21262D", display:"flex",
             flexDirection:"column", background:"#161B22", flexShrink:0 }}>
             <div style={{ display:"flex", borderBottom:"1px solid #21262D" }}>
@@ -1720,6 +2532,18 @@ export default function TerraScope() {
         {mainView === "ga" && (
           <div style={{ flex:1, overflow:"hidden" }}>
             <GAWorkflowPanel repo={selectedRepo} health={health} />
+          </div>
+        )}
+
+        {mainView === "scenarios" && (
+          <div style={{ flex:1, overflow:"hidden" }}>
+            <ScenariosPanel />
+          </div>
+        )}
+
+        {mainView === "troubleshoot" && (
+          <div style={{ flex:1, overflow:"hidden" }}>
+            <TroubleshootPanel repos={repos} selectedRepo={selectedRepo} />
           </div>
         )}
       </div>

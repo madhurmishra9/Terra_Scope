@@ -41,12 +41,13 @@ from backend.ga_workflow.ga_orchestrator import (
 from backend.ga_workflow.gcp_service_detector import scan_gcp_service_features
 from backend.ga_workflow.ga_detector import (
     detect_ga_release,
+    detect_terraform_provider,
     fetch_provider_changelog,
     get_current_provider_version,
 )
 from backend.ga_workflow.ga_validators import validate_all
 from backend.ga_workflow.ga_compat import check_provider_compatibility
-from backend.ga_workflow.gcp_service_scanner import scan_gcp_service, GCP_PRODUCT_API_MAP
+from backend.ga_workflow.gcp_service_scanner import GCP_PRODUCT_API_MAP
 from backend.agent.tools.git_tools import get_latest_tag, list_tags_for_repo
 
 
@@ -129,13 +130,17 @@ async def detect_ga(repo_name: str) -> dict:
         "new_features":     ga.new_features,
         "changelog_url":    ga.changelog_url,
         "fetched_at":       ga.fetched_at,
+        "cloud_provider":   ga.cloud_provider.value if ga.cloud_provider else "google",
         "changes":          [
             {
-                "change_type":   c.change_type.value,
-                "resource_type": c.resource_type,
-                "attribute":     c.attribute_name,
-                "description":   c.description,
-                "breaking":      c.breaking,
+                "change_type":    c.change_type.value,
+                "resource_type":  c.resource_type,
+                "attribute":      c.attribute_name,
+                "description":    c.description,
+                "breaking":       c.breaking,
+                "breaking_reason": c.breaking_reason.value if c.breaking_reason else None,
+                "migration_note": c.migration_note,
+                "cloud_provider": c.cloud_provider.value if c.cloud_provider else "google",
             }
             for c in change_set.changes
         ],
@@ -233,14 +238,12 @@ async def get_changelog(repo_name: str) -> dict:
 
     # Get current version
     tag = get_latest_tag(repo_name) or "main"
-    from backend.ga_workflow.ga_detector import (
-        get_current_provider_version,
-        fetch_latest_ga_version,
-    )
-    current_ver = get_current_provider_version(repo_name, tag) or "0.0.0"
-    latest_ver  = await fetch_latest_ga_version() or current_ver
+    from backend.ga_workflow.ga_detector import fetch_latest_ga_version
+    provider_key = detect_terraform_provider(repo_name, tag)
+    current_ver  = get_current_provider_version(repo_name, tag) or "0.0.0"
+    latest_ver   = await fetch_latest_ga_version(provider_key) or current_ver
 
-    content = await fetch_provider_changelog(current_ver, latest_ver)
+    content = await fetch_provider_changelog(current_ver, latest_ver, provider_key)
     now_iso = datetime.now(timezone.utc).isoformat()
     _changelog_cache[repo_name] = (now_iso, content)
 
@@ -369,11 +372,8 @@ async def scan_service(
     days_back: int = Query(default=180, ge=7, le=365),
 ) -> dict:
     """
-    Scan Google Cloud release notes and API Discovery for new GA features
-    for the GCP service/product associated with this repo.
-
-    This is independent of Terraform provider version — it checks what
-    Google Cloud itself has announced as GA for the service.
+    Scan cloud release notes for new GA features for the service associated
+    with this repo. Auto-detects provider (GCP/AWS/Azure) from versions.tf.
 
     Args:
         days_back: How many days of release notes to scan (default 180 = 6 months)
@@ -387,7 +387,7 @@ async def scan_service(
 
     scan = await scan_gcp_service_features(repo_name=repo_name, run=run, days_back=days_back)
     if scan is None:
-        raise HTTPException(status_code=502, detail="GCP service scan failed. Check logs.")
+        raise HTTPException(status_code=502, detail="Cloud service scan failed. Check logs.")
 
     return scan.to_dict()
 
@@ -395,37 +395,38 @@ async def scan_service(
 # ── GET /scan/{repo_name} ─────────────────────────────────────────────────────
 
 @ga_router.get("/scan/{repo_name}")
-async def scan_gcp_service_endpoint(
+async def scan_cloud_service_endpoint(
     repo_name: str,
-    force: bool = Query(default=False, description="Re-scan even if cached"),
+    days_back: int = Query(default=180, ge=7, le=365),
 ) -> dict:
     """
-    Scan the GCP service/product associated with this repo for new GA features
-    that are not yet reflected in the Terraform module code.
+    Scan the cloud service associated with this repo for new GA features not yet
+    reflected in the Terraform module code. Auto-detects provider from versions.tf.
 
-    Queries:
-      - Google Cloud Release Notes feed for the product
-      - Google API Discovery Service schema
-      - Local LLM to map GCP features to Terraform impact
-
-    Returns a GCPServiceScanResult with all detected features and
-    actionable_features (those not yet in the module).
+    Returns a GCPServiceScanResult (naming kept for backward compat) with all
+    detected features and actionable_features (those not yet in the module).
     """
     cfg = get_config()
     repo_cfg = cfg.get_repo(repo_name)
     if not repo_cfg:
-        raise HTTPException(status_code=404, detail=f"Repo \'{repo_name}\' not configured.")
+        raise HTTPException(status_code=404, detail=f"Repo '{repo_name}' not configured.")
 
     product = repo_cfg.gcp_product
-    product_info = GCP_PRODUCT_API_MAP.get(product, {})
 
     run = WorkflowRun(run_id="_scan", repo_name=repo_name, gcp_product=product)
 
-    result = await scan_gcp_service(repo_name=repo_name, run=run)
+    tag = get_latest_tag(repo_name) or "main"
+    provider_key = detect_terraform_provider(repo_name, tag)
+
+    from backend.ga_workflow.cloud_service_scanner import scan_cloud_service
+    result = await scan_cloud_service(repo_name=repo_name, provider_key=provider_key, run=run, days_back=days_back)
+
+    product_info = GCP_PRODUCT_API_MAP.get(product, {})
 
     return {
         "repo_name":          result.repo_name,
         "gcp_product":        result.gcp_product,
+        "cloud_provider":     provider_key,
         "scan_date":          result.scan_date,
         "total_features":     result.total_features,
         "actionable_count":   result.actionable_count,
@@ -441,7 +442,7 @@ async def scan_gcp_service_endpoint(
                 "terraform_resources": f.terraform_resources,
                 "terraform_args":      f.terraform_args,
                 "ga_confirmed":        f.ga_confirmed,
-                "source":              f.source,
+                "source":              getattr(f, "source", ""),
                 "source_url":          f.source_url,
             }
             for f in result.features
@@ -470,18 +471,41 @@ async def scan_gcp_service_endpoint(
 @ga_router.get("/products")
 async def list_supported_products() -> dict:
     """
-    List all GCP products/services that TerraScope can scan for GA features,
-    with their Discovery API names and release notes slugs.
+    List all cloud products/services that TerraScope can scan for GA features,
+    across GCP, AWS, and Azure.
     """
+    from backend.ga_workflow.cloud_service_scanner import AWS_PRODUCT_MAP, AZURE_PRODUCT_MAP
+
+    gcp_products = {
+        product: {
+            "cloud":       "gcp",
+            "api_name":    info["api_name"],
+            "version":     info["version"],
+            "docs_url":    info["docs_url"],
+            "tf_prefix":   info["tf_resource_prefix"],
+        }
+        for product, info in GCP_PRODUCT_API_MAP.items()
+    }
+    aws_products = {
+        product: {
+            "cloud":     "aws",
+            "tf_prefix": info["tf_prefix"],
+            "search_terms": info["search_terms"],
+        }
+        for product, info in AWS_PRODUCT_MAP.items()
+    }
+    azure_products = {
+        product: {
+            "cloud":     "azure",
+            "tf_prefix": info["tf_prefix"],
+            "search_terms": info["search_terms"],
+        }
+        for product, info in AZURE_PRODUCT_MAP.items()
+    }
+
+    all_products = {**gcp_products, **aws_products, **azure_products}
     return {
-        "supported_products": {
-            product: {
-                "api_name":    info["api_name"],
-                "version":     info["version"],
-                "docs_url":    info["docs_url"],
-                "tf_prefix":   info["tf_resource_prefix"],
-            }
-            for product, info in GCP_PRODUCT_API_MAP.items()
-        },
-        "total": len(GCP_PRODUCT_API_MAP),
+        "supported_products": all_products,
+        "total": len(all_products),
+        "by_cloud": {"gcp": len(gcp_products), "aws": len(aws_products), "azure": len(azure_products)},
     }

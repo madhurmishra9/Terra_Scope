@@ -18,6 +18,9 @@ from backend.ga_workflow.ga_models import (
     GAChangeSet,
     GAChange,
     ChangeType,
+    CloudProvider,
+    BreakingReason,
+    IncrementalState,
     BranchResult,
     CodeChange,
     CodeChangeSet,
@@ -31,13 +34,17 @@ from backend.ga_workflow.ga_models import (
     PRAction,
     ExistingPR,
     WorkflowLog,
+    GCPServiceFeatureModel,
+    GCPServiceScanResult,
 )
 
 __all__ = [
     "WorkflowRun", "WorkflowStage", "GAWorkflowRequest",
     "GARelease", "GAChangeSet", "GAChange", "ChangeType",
+    "CloudProvider", "BreakingReason", "IncrementalState",
     "BranchResult", "CodeChange", "CodeChangeSet",
     "ValidationResult", "ValidatorReport", "ValidationIssue", "ValidationSeverity",
     "ProviderCompatibility", "ProviderCompatCheck",
     "PRResult", "PRAction", "ExistingPR", "WorkflowLog",
+    "GCPServiceFeatureModel", "GCPServiceScanResult",
 ]

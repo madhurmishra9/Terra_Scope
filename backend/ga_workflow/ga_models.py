@@ -9,6 +9,12 @@ Pipeline stages:
   5. Provider Compatibility → ProviderCompatibility
   6. PR Management          → PRStatus, PRResult
   7. Orchestrator           → WorkflowRun (full pipeline state)
+
+Multi-cloud support (v2.3):
+  - CloudProvider enum covers Google (GCP), AWS, Azure
+  - BreakingReason enum classifies WHY a change is breaking
+  - GAChange carries cloud_provider + breaking_reason + migration_note
+  - IncrementalState tracks applied changes per repo to avoid re-work
 """
 from __future__ import annotations
 
@@ -20,45 +26,63 @@ from pydantic import BaseModel, Field
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
+class CloudProvider(str, Enum):
+    GCP   = "google"    # hashicorp/google
+    AWS   = "aws"       # hashicorp/aws
+    AZURE = "azurerm"   # hashicorp/azurerm
+
+
 class WorkflowStage(str, Enum):
-    IDLE            = "idle"
-    DETECTING       = "detecting_ga"
-    ANALYZING       = "analyzing_changes"
-    BRANCHING       = "creating_branch"
-    IMPLEMENTING    = "implementing_changes"
-    VALIDATING      = "validating_code"
-    CHECKING_PR     = "checking_pr"
-    CREATING_PR     = "creating_pr"
-    UPDATING_PR     = "updating_pr"
-    DONE            = "done"
-    FAILED          = "failed"
+    IDLE             = "idle"
+    DETECTING        = "detecting_ga"
+    SCANNING_SERVICE = "scanning_gcp_service"
+    ANALYZING        = "analyzing_changes"
+    BRANCHING        = "creating_branch"
+    IMPLEMENTING     = "implementing_changes"
+    VALIDATING       = "validating_code"
+    CHECKING_PR      = "checking_pr"
+    CREATING_PR      = "creating_pr"
+    UPDATING_PR      = "updating_pr"
+    DONE             = "done"
+    FAILED           = "failed"
 
 
 class ChangeType(str, Enum):
-    NEW_RESOURCE       = "new_resource"         # Brand-new GCP resource type
-    NEW_ARGUMENT       = "new_argument"         # New field on existing resource
-    DEPRECATED_ARG     = "deprecated_argument"  # Field removed/deprecated
-    NEW_VARIABLE       = "new_variable"         # New module input variable
-    UPDATED_VARIABLE   = "updated_variable"     # Changed type/default/desc
-    REMOVED_VARIABLE   = "removed_variable"     # Variable dropped
-    PROVIDER_VERSION   = "provider_version"     # Required provider version bump
-    NEW_OUTPUT         = "new_output"           # New module output
-    IAM_CHANGE         = "iam_change"           # New IAM role or binding pattern
-    API_REQUIREMENT    = "api_requirement"      # New GCP API enablement required
-    VALIDATION_RULE    = "validation_rule"      # New validation block on variable
-    LIFECYCLE_CHANGE   = "lifecycle_change"     # lifecycle{} block change
+    NEW_RESOURCE       = "new_resource"
+    NEW_ARGUMENT       = "new_argument"
+    DEPRECATED_ARG     = "deprecated_argument"
+    NEW_VARIABLE       = "new_variable"
+    UPDATED_VARIABLE   = "updated_variable"
+    REMOVED_VARIABLE   = "removed_variable"
+    PROVIDER_VERSION   = "provider_version"
+    NEW_OUTPUT         = "new_output"
+    IAM_CHANGE         = "iam_change"
+    API_REQUIREMENT    = "api_requirement"
+    VALIDATION_RULE    = "validation_rule"
+    LIFECYCLE_CHANGE   = "lifecycle_change"
+
+
+class BreakingReason(str, Enum):
+    """WHY a change is breaking — drives migration guidance shown to the user."""
+    REMOVED            = "removed"            # resource or argument no longer exists
+    RENAMED            = "renamed"            # identifier changed; old name rejected
+    TYPE_CHANGED       = "type_changed"       # e.g. string → list, number → bool
+    REQUIRED_NOW       = "required_now"       # was optional, now required with no default
+    BEHAVIOR_CHANGED   = "behavior_changed"   # default value or validation logic changed
+    DEPRECATED_REMOVED = "deprecated_removed" # was deprecated, now fully removed
+    UNKNOWN            = "unknown"            # breaking signal found but reason unclear
 
 
 class ValidationSeverity(str, Enum):
-    ERROR   = "error"    # Must fix before PR
-    WARNING = "warning"  # Should fix, not blocking
-    INFO    = "info"     # Informational only
+    ERROR   = "error"
+    WARNING = "warning"
+    INFO    = "info"
 
 
 class PRAction(str, Enum):
     CREATED = "created"
     UPDATED = "updated"
-    SKIPPED = "skipped"   # Already up-to-date
+    SKIPPED = "skipped"
     FAILED  = "failed"
 
 
@@ -67,23 +91,27 @@ class PRAction(str, Enum):
 class GAChange(BaseModel):
     """One discrete GA change from the provider changelog."""
     change_type:      ChangeType
-    resource_type:    str              # e.g. google_bigquery_dataset
-    attribute_name:   Optional[str]   # e.g. "max_time_travel_hours"
-    description:      str             # Human-readable description of the change
-    provider_version: str             # First provider version that includes this
-    breaking:         bool = False    # True if this is a breaking change
-    migration_guide:  Optional[str]  # HCL migration snippet if breaking
-    source_url:       Optional[str]  # Link to provider changelog/docs
+    resource_type:    str                              # e.g. google_bigquery_dataset / aws_s3_bucket
+    attribute_name:   Optional[str] = None            # e.g. "max_time_travel_hours"
+    description:      str                             # Human-readable description of the change
+    provider_version: str                             # First provider version that includes this
+    breaking:         bool = False                    # True if this is a breaking change
+    breaking_reason:  Optional[BreakingReason] = None # WHY it is breaking
+    migration_note:   Optional[str] = None            # Plain-English migration guidance
+    migration_guide:  Optional[str] = None            # HCL snippet showing how to migrate
+    cloud_provider:   CloudProvider = CloudProvider.GCP
+    source_url:       Optional[str] = None
 
 
 class GARelease(BaseModel):
     """Metadata about the latest GA provider release."""
     provider:            str = "hashicorp/google"
-    current_version:     str        # Version currently used in the module
-    latest_ga_version:   str        # Latest available GA version
-    upgrade_required:    bool       # True if latest > current
-    breaking_changes:    int = 0    # Count of breaking changes
-    new_features:        int = 0    # Count of new features
+    cloud_provider:      CloudProvider = CloudProvider.GCP
+    current_version:     str
+    latest_ga_version:   str
+    upgrade_required:    bool
+    breaking_changes:    int = 0
+    new_features:        int = 0
     changelog_url:       str = ""
     fetched_at:          str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -91,12 +119,28 @@ class GARelease(BaseModel):
 class GAChangeSet(BaseModel):
     """Full analysis: what changed between current and latest GA provider."""
     repo_name:        str
-    gcp_product:      str
-    current_tag:      str           # Module tag currently analyzed
+    gcp_product:      str            # generic cloud product/service label
+    current_tag:      str
     ga_release:       GARelease
     changes:          list[GAChange]
-    files_to_modify:  list[str]     # .tf files that need editing
-    summary:          str           # One-paragraph human summary
+    new_changes:      list[GAChange] = []  # subset not yet applied (incremental)
+    files_to_modify:  list[str]
+    summary:          str
+
+
+# ── Incremental state ─────────────────────────────────────────────────────────
+
+class IncrementalState(BaseModel):
+    """
+    Persisted per-repo state that lets the GA workflow skip changes
+    that have already been implemented in a previous run.
+    Stored at ./data/ga_state/{repo_name}.json
+    """
+    repo_name:               str
+    last_scan:               str = ""
+    applied_provider_version: str = ""
+    applied_change_hashes:   list[str] = []
+    service_features_seen:   list[str] = []
 
 
 # ── Stage 2: Branch Management ────────────────────────────────────────────────
@@ -171,11 +215,11 @@ class ValidationResult(BaseModel):
 class ProviderCompatCheck(BaseModel):
     """Result of checking one resource/attribute against the provider schema."""
     resource_type:   str
-    attribute_name:  Optional[str]
+    attribute_name:  Optional[str] = None
     supported:       bool
-    min_version:     Optional[str]   # Minimum provider version needed
-    deprecated_in:   Optional[str]   # Provider version where it was deprecated
-    notes:           Optional[str]
+    min_version:     Optional[str] = None  # Minimum provider version needed
+    deprecated_in:   Optional[str] = None  # Provider version where it was deprecated
+    notes:           Optional[str] = None
 
 
 class ProviderCompatibility(BaseModel):
@@ -185,7 +229,7 @@ class ProviderCompatibility(BaseModel):
     target_version:    str
     all_compatible:    bool
     checks:            list[ProviderCompatCheck]
-    versions_tf_update: Optional[str]  # New versions.tf content if bump needed
+    versions_tf_update: Optional[str] = None  # New versions.tf content if bump needed
 
 
 # ── Stage 6: PR Management ────────────────────────────────────────────────────
@@ -243,6 +287,7 @@ class WorkflowRun(BaseModel):
     # Stage outputs — populated as each stage completes
     ga_release:          Optional[GARelease]          = None
     change_set:          Optional[GAChangeSet]         = None
+    gcp_service_scan:    Optional["GCPServiceScanResult"] = None
     branch_result:       Optional[BranchResult]        = None
     code_changes:        Optional[CodeChangeSet]       = None
     validation_result:   Optional[ValidationResult]    = None
@@ -265,6 +310,39 @@ class WorkflowRun(BaseModel):
         self.stage = WorkflowStage.FAILED
         self.error = message
         self.completed_at = datetime.utcnow().isoformat()
+
+
+# ── GCP Service Scan models ───────────────────────────────────────────────────
+
+class GCPServiceFeatureModel(BaseModel):
+    feature_name:        str
+    description:         str
+    announced_date:      str = ""
+    product:             str = ""
+    source:              str = ""
+    terraform_impact:    str = "unknown"
+    terraform_resources: list[str] = []
+    terraform_args:      list[str] = []
+    source_url:          str = ""
+    ga_confirmed:        bool = False
+
+    def to_dict(self) -> dict:
+        return self.model_dump()
+
+
+class GCPServiceScanResult(BaseModel):
+    repo_name:           str
+    gcp_product:         str
+    scan_date:           str
+    total_features:      int = 0
+    actionable_count:    int = 0
+    features:            list[GCPServiceFeatureModel] = []
+    actionable_features: list[GCPServiceFeatureModel] = []
+    module_resources:    list[str] = []
+    summary:             str = ""
+
+    def to_dict(self) -> dict:
+        return self.model_dump()
 
 
 # ── Request / Response for API ────────────────────────────────────────────────

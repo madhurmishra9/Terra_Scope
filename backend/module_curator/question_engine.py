@@ -12,29 +12,78 @@ v2.1 changes
   MAX_FOLLOWUPS extra questions. If nothing is missing, returns []
   and the session moves to READY.
 
+v2.2 (Phase 1 pipeline refactor)
+=================================
+* `_ask_llm_for_questions` and `_ask_llm_for_followups` now use PydanticAI
+  Agents with output_type=QuestionSet instead of raw AsyncOpenAI + json.loads.
+  The provider-specific fallback chain is preserved as the on-parse-failure path.
+
 If the LLM call fails for any reason, both phases degrade gracefully to
 deterministic fallbacks so the pipeline never stalls.
 """
 from __future__ import annotations
 
-import json
 import re
+from typing import Optional
 
-from openai import AsyncOpenAI
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from backend.config import get_config
 from backend.module_curator.models import CurationMode, CurationSession
+from backend.pipeline.models import QuestionSet
 
 MAX_QUESTIONS  = 7
 MAX_FOLLOWUPS  = 3
 
+_question_agent: Optional[Agent] = None
+_followup_agent: Optional[Agent] = None
 
-def _client() -> AsyncOpenAI:
+
+def _make_model() -> OpenAIChatModel:
     cfg = get_config()
-    return AsyncOpenAI(
-        base_url=cfg.llm.base_url.rstrip("/") + "/v1",
-        api_key="ollama",
+    return OpenAIChatModel(
+        model_name=cfg.llm.model,
+        provider=OpenAIProvider(
+            base_url=cfg.llm.base_url.rstrip("/") + "/v1",
+            api_key="ollama",
+        ),
     )
+
+
+def _get_question_agent() -> Agent:
+    global _question_agent
+    if _question_agent is None:
+        _question_agent = Agent(
+            model=_make_model(),
+            output_type=QuestionSet,
+            system_prompt=(
+                "You are a senior Terraform infrastructure engineer. "
+                "Your job is to produce a precise JSON list of clarifying questions "
+                "that will let you write a 100%-correct Terraform module. "
+                "Output ONLY a JSON object with a 'questions' array of strings. "
+                "No markdown, no commentary."
+            ),
+        )
+    return _question_agent
+
+
+def _get_followup_agent() -> Agent:
+    global _followup_agent
+    if _followup_agent is None:
+        _followup_agent = Agent(
+            model=_make_model(),
+            output_type=QuestionSet,
+            system_prompt=(
+                "You are a senior Terraform infrastructure engineer reviewing Q&A pairs. "
+                "Identify gaps, ambiguities, and missing required inputs. "
+                "Output ONLY a JSON object with a 'questions' array of follow-up strings. "
+                "Return an empty array if no follow-ups are needed. "
+                "No markdown, no commentary."
+            ),
+        )
+    return _followup_agent
 
 
 # ── Context assembly ─────────────────────────────────────────────────────────
@@ -174,10 +223,7 @@ async def _ask_llm_for_questions(
     n: int,
     already_asked: list[str],
 ) -> list[str]:
-    cfg = get_config()
-    client = _client()
     context = _build_context(session)
-
     already = "\n".join(f"  - {q}" for q in already_asked) or "  (none yet)"
 
     prompt = (
@@ -193,22 +239,15 @@ async def _ask_llm_for_questions(
         "  - High-availability & scaling: multi-region, replicas\n"
         "  - Naming and tagging conventions\n"
         "  - Cross-service integrations\n"
-        "Return ONLY a valid JSON array of question strings. No markdown, "
-        "no commentary. Example: [\"Question A?\", \"Question B?\"]"
+        f"Return a JSON object with a 'questions' key containing exactly {n} strings."
     )
 
     try:
-        resp = await client.chat.completions.create(
-            model=cfg.llm.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=500,
-        )
-        raw = _strip_fences(resp.choices[0].message.content.strip())
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            cleaned = [q.strip() for q in parsed if isinstance(q, str) and q.strip()]
-            return cleaned[:n]
+        agent = _get_question_agent()
+        result = await agent.run(prompt)
+        qs: QuestionSet = result.data
+        cleaned = [q.strip() for q in qs.questions if q.strip()]
+        return cleaned[:n]
     except Exception as exc:
         print(f"[question_engine] LLM question generation failed: {exc}")
     return []
@@ -225,8 +264,6 @@ async def generate_followups(session: CurationSession) -> list[str]:
     if session.followup_round >= session.max_followup_rounds:
         return []
 
-    cfg = get_config()
-    client = _client()
     context = _build_context(session)
 
     qa_block = "\n".join(
@@ -245,26 +282,18 @@ async def generate_followups(session: CurationSession) -> list[str]:
         "    like 'TBD', 'maybe', 'either', 'whatever you think'.\n"
         "  - Critical decisions still missing (e.g. region not specified, "
         "    encryption posture unclear, IAM principal not named).\n\n"
-        f"Return at MOST {MAX_FOLLOWUPS} follow-up questions as a JSON array of strings. "
-        "If the answers fully cover everything needed, return an empty array []. "
-        "Output ONLY the JSON array — no markdown, no commentary."
+        f"Return a JSON object with a 'questions' key containing at most {MAX_FOLLOWUPS} "
+        "follow-up question strings. Use an empty array if no follow-ups are needed."
     )
 
     try:
-        resp = await client.chat.completions.create(
-            model=cfg.llm.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=400,
-        )
-        raw = _strip_fences(resp.choices[0].message.content.strip())
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            cleaned = [q.strip() for q in parsed if isinstance(q, str) and q.strip()]
-            # Filter out questions we've already asked verbatim
-            asked = {qa.question for qa in session.qa_pairs}
-            new = [q for q in cleaned if q not in asked]
-            return new[:MAX_FOLLOWUPS]
+        agent = _get_followup_agent()
+        result = await agent.run(prompt)
+        qs: QuestionSet = result.data
+        cleaned = [q.strip() for q in qs.questions if q.strip()]
+        asked = {qa.question for qa in session.qa_pairs}
+        new = [q for q in cleaned if q not in asked]
+        return new[:MAX_FOLLOWUPS]
     except Exception as exc:
         print(f"[question_engine] LLM follow-up generation failed: {exc}")
 
@@ -294,13 +323,6 @@ def _heuristic_followups(session: CurationSession) -> list[str]:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _strip_fences(text: str) -> str:
-    """Remove markdown code fences if the LLM wrapped the JSON."""
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = text.replace("```", "").strip()
-    return text
-
 
 def _fallback_questions(session: CurationSession) -> list[str]:
     service = session.service_name or "this service"

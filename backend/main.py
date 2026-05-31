@@ -22,6 +22,14 @@ Endpoints:
 
   GET  /api/registry/status                   — Registry cache stats + network status
   POST /api/registry/fetch                    — Pre-fetch docs for a provider+service
+
+  POST /api/scenarios/start                   — Create scenario generation session
+  POST /api/scenarios/{id}/upload-module      — Upload ZIP or .tf for scenario gen
+  POST /api/scenarios/{id}/set-source         — Set GitHub / local source for scenario gen
+  GET  /api/scenarios/{id}                    — Poll scenario session state
+  POST /api/scenarios/{id}/generate           — Run full scenario pipeline (background)
+
+  POST /api/troubleshoot                      — Detect logical/syntactic bugs + suggest safe upgrade
 """
 from __future__ import annotations
 
@@ -47,12 +55,14 @@ from backend.module_curator import curator
 from backend.module_curator.models import StartCurationRequest, SetSourceRequest, AnswerRequest
 from backend.registry_fetcher.registry_api import fetch_service_docs, is_network_available
 from backend.registry_fetcher.cache_manager import cache_stats
+from backend.ga_workflow.ga_router import ga_router
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
 _indexing_jobs:    dict[str, str]               = {}   # repo_name -> status string
 _generation_jobs:  dict[str, GenerationResponse] = {}   # job_id    -> result
+_scenario_sessions: dict[str, "ScenarioSession"] = {}   # session_id -> ScenarioSession
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -74,6 +84,8 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+app.include_router(ga_router, prefix="/api/ga")
 
 app.add_middleware(
     CORSMiddleware,
@@ -434,6 +446,285 @@ async def registry_fetch(request: RegistryFetchRequest):
         }
     except Exception as exc:
         raise HTTPException(500, f"Registry fetch failed: {exc}")
+
+
+# ── Scenario Generator ────────────────────────────────────────────────────────
+# Import lazily to avoid startup failures if optional deps missing
+from backend.scenario_generator.models import (
+    ScenarioSession,
+    ScenarioSessionStatus,
+)
+
+
+class StartScenarioRequest(BaseModel):
+    source_type: str = "github"   # github | local | zip | tf
+    url:         str = ""
+    path:        str = ""
+    tag:         Optional[str] = None
+
+
+class ScenarioSetSourceRequest(BaseModel):
+    source_type: str
+    url:         str = ""
+    path:        str = ""
+    tag:         Optional[str] = None
+
+
+@app.post("/api/scenarios/start")
+async def scenario_start(request: StartScenarioRequest):
+    """Create a new scenario generation session."""
+    session_id = str(uuid.uuid4())
+    session = ScenarioSession(
+        session_id=session_id,
+        source_type=request.source_type,
+        source_url=request.url or request.path,
+        tag=request.tag,
+        status=ScenarioSessionStatus.LOADING,
+    )
+    _scenario_sessions[session_id] = session
+    return session.model_dump()
+
+
+@app.post("/api/scenarios/{session_id}/upload-module")
+async def scenario_upload_module(session_id: str, file: UploadFile = File(...)):
+    """Upload a ZIP or .tf file as the module source for scenario generation."""
+    session = _scenario_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, f"Scenario session '{session_id}' not found")
+    try:
+        raw = await file.read()
+        fname = file.filename or ""
+        if fname.endswith(".zip"):
+            from backend.scenario_generator.loader import load_from_zip
+            tf_files = load_from_zip(raw)
+        elif fname.endswith(".tf"):
+            tf_files = {fname: raw.decode("utf-8", errors="replace")}
+        else:
+            raise HTTPException(400, "Only .zip or .tf files are accepted")
+        session.status = ScenarioSessionStatus.PARSING
+        # Parse immediately so we know what we have
+        from backend.scenario_generator.parser import build_module_spec
+        module_name = fname.replace(".zip", "").replace(".tf", "") or "module"
+        session.module_spec = build_module_spec(tf_files, module_name=module_name, module_source="uploaded")
+        session.status = ScenarioSessionStatus.PLANNING
+    except HTTPException:
+        raise
+    except Exception as exc:
+        session.status = ScenarioSessionStatus.ERROR
+        session.error_message = str(exc)
+        raise HTTPException(500, f"Module upload failed: {exc}")
+    return session.model_dump()
+
+
+@app.post("/api/scenarios/{session_id}/set-source")
+async def scenario_set_source(session_id: str, request: ScenarioSetSourceRequest):
+    """Set GitHub or local source for the scenario session (loads + parses immediately)."""
+    session = _scenario_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, f"Scenario session '{session_id}' not found")
+    try:
+        session.status = ScenarioSessionStatus.LOADING
+        from backend.scenario_generator.loader import load_module
+        tf_files = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: load_module(
+                source_type=request.source_type,
+                url=request.url,
+                local_path=request.path,
+                tag=request.tag,
+            ),
+        )
+        session.source_url = request.url or request.path
+        session.tag = request.tag
+        session.status = ScenarioSessionStatus.PARSING
+
+        from backend.scenario_generator.parser import build_module_spec
+        module_name = (request.url or request.path).rstrip("/").split("/")[-1] or "module"
+        session.module_spec = build_module_spec(
+            tf_files, module_name=module_name, module_source=request.url or request.path
+        )
+        session.status = ScenarioSessionStatus.PLANNING
+    except Exception as exc:
+        session.status = ScenarioSessionStatus.ERROR
+        session.error_message = str(exc)
+        raise HTTPException(500, f"Source loading failed: {exc}")
+    return session.model_dump()
+
+
+@app.get("/api/scenarios/{session_id}")
+async def scenario_get(session_id: str):
+    """Poll scenario session state."""
+    session = _scenario_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, f"Scenario session '{session_id}' not found")
+    return session.model_dump()
+
+
+@app.post("/api/scenarios/{session_id}/generate")
+async def scenario_generate(session_id: str, background_tasks: BackgroundTasks):
+    """Run the full scenario pipeline (plan → synthesize → validate) in the background."""
+    session = _scenario_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, f"Scenario session '{session_id}' not found")
+    if session.module_spec is None:
+        raise HTTPException(400, "Module not loaded yet. Call /set-source or /upload-module first.")
+
+    async def _pipeline() -> None:
+        try:
+            spec = session.module_spec
+
+            # Plan
+            session.status = ScenarioSessionStatus.PLANNING
+            from backend.scenario_generator.planner import plan_scenarios
+            plan = await plan_scenarios(spec)
+            session.scenario_plan = plan
+
+            # Synthesize
+            session.status = ScenarioSessionStatus.GENERATING
+            from backend.scenario_generator.synthesizer import (
+                build_output_dir, synthesize_scenario, write_scenario,
+            )
+            out_dir = build_output_dir(spec.module_name)
+            session.output_dir = str(out_dir)
+            generated = []
+            for entry in plan.scenarios:
+                gs = synthesize_scenario(entry, spec)
+                gs = write_scenario(gs, out_dir, session.source_url or "")
+                generated.append(gs)
+            session.generated_scenarios = generated
+
+            # Validate
+            session.status = ScenarioSessionStatus.VALIDATING
+            from backend.scenario_generator.validator import validate_all
+            results = await validate_all(generated, spec, module_source_path=session.source_url or "")
+            session.validation_results = results
+
+            # Coverage
+            from backend.scenario_generator.coverage import build_coverage_report, write_coverage_md
+            report = build_coverage_report(spec, generated, results)
+            session.coverage_report = report
+            write_coverage_md(report, out_dir)
+
+            session.status = ScenarioSessionStatus.DONE
+        except Exception as exc:
+            session.status = ScenarioSessionStatus.ERROR
+            session.error_message = str(exc)
+            print(f"[scenario_generate] Pipeline error: {exc}")
+
+    background_tasks.add_task(_pipeline)
+    return {"status": "pipeline_started", "session_id": session_id,
+            "message": "Poll GET /api/scenarios/{session_id} for progress."}
+
+
+@app.post("/api/scenarios/{session_id}/rerun/{scenario_name}")
+async def scenario_rerun(session_id: str, scenario_name: str, background_tasks: BackgroundTasks):
+    """Re-run validation for a single failing scenario."""
+    session = _scenario_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, f"Scenario session '{session_id}' not found")
+    gs = next((g for g in session.generated_scenarios if g.name == scenario_name), None)
+    if not gs:
+        raise HTTPException(404, f"Scenario '{scenario_name}' not found")
+
+    async def _rerun() -> None:
+        from backend.scenario_generator.validator import validate_all
+        new_results = await validate_all([gs], session.module_spec, session.source_url or "")
+        # Merge: replace the result for this scenario
+        updated = [r for r in session.validation_results if r.scenario != scenario_name]
+        updated.extend(new_results)
+        session.validation_results = updated
+
+    background_tasks.add_task(_rerun)
+    return {"status": "rerun_started", "scenario": scenario_name}
+
+
+# ── Troubleshoot ─────────────────────────────────────────────────────────────
+
+class TroubleshootRequest(BaseModel):
+    repo_name:           str
+    tag:                 Optional[str] = None   # defaults to latest tag
+    problem_description: str = ""               # optional user-reported symptom
+
+
+@app.post("/api/troubleshoot")
+async def troubleshoot(request: TroubleshootRequest) -> dict:
+    """
+    Analyse a Terraform module at a specific tag for logical and syntactic bugs.
+
+    Three-stage pipeline:
+      1. Static analysis — undefined references, type issues, security patterns,
+         deprecated usage, missing provider constraints.
+      2. LLM analysis   — logical bugs, anti-patterns, security misconfigs,
+         missing `depends_on`, hardcoded values, etc.
+      3. Version recommendation — finds the minimum provider version that fixes
+         detected issues without introducing breaking changes for this module.
+
+    Request:
+      repo_name           — must match terrascope.config.yaml
+      tag                 — Git tag to analyse (omit for latest tag)
+      problem_description — optional error message or symptom to guide the LLM
+
+    Returns a TroubleshootResult with all issues and a version recommendation.
+    """
+    cfg = get_config()
+    if not cfg.get_repo(request.repo_name):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Repo '{request.repo_name}' not found in terrascope.config.yaml.",
+        )
+
+    from backend.troubleshooter.troubleshooter import troubleshoot_module
+    from backend.agent.tools.git_tools import get_latest_tag as _latest
+
+    tag = request.tag or _latest(request.repo_name) or "main"
+
+    try:
+        result = await troubleshoot_module(
+            repo_name=request.repo_name,
+            tag=tag,
+            problem_description=request.problem_description,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Troubleshoot failed: {e}")
+
+    ver_rec = None
+    if result.version_recommendation:
+        vr = result.version_recommendation
+        ver_rec = {
+            "current_version":     vr.current_version,
+            "recommended_version": vr.recommended_version,
+            "reason":              vr.reason,
+            "breaking_changes":    vr.breaking_changes,
+            "safe_to_upgrade":     vr.safe_to_upgrade,
+            "changelog_url":       vr.changelog_url,
+            "fixes_in_version":    vr.fixes_in_version,
+        }
+
+    return {
+        "repo_name":    result.repo_name,
+        "tag":          result.tag,
+        "scan_date":    result.scan_date,
+        "summary":      result.summary,
+        "error_count":  result.error_count,
+        "warning_count": result.warning_count,
+        "info_count":   result.info_count,
+        "scanned_files": result.scanned_files,
+        "version_recommendation": ver_rec,
+        "issues": [
+            {
+                "severity":      i.severity.value,
+                "category":      i.category.value,
+                "file_path":     i.file_path,
+                "line":          i.line,
+                "resource_type": i.resource_type,
+                "resource_name": i.resource_name,
+                "message":       i.message,
+                "suggestion":    i.suggestion,
+                "fixed_in_version": i.fixed_in_version,
+            }
+            for i in result.issues
+        ],
+    }
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
