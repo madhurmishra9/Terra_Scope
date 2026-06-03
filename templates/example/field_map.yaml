@@ -1,0 +1,78 @@
+# field_map.yaml — maps {{ token }} placeholders to Terraform module metadata
+#
+# To use: copy this folder, rename it to your GCP service name, add your
+# reference <service>.docx, and annotate the .docx with {{ token }} placeholders.
+#
+# Source types
+# ------------
+#   metadata.<attr>   — value from TFModuleMetadata (see metadata/extractor.py)
+#   literal.<value>   — static string (everything after the first dot)
+#
+# Format types (optional, default: text)
+# ---------------------------------------
+#   text              — plain string
+#   bullet_list       — list rendered as  • item1 \n • item2
+#   table             — dict rendered as a markdown table; requires `columns:`
+#
+# fallback            — value to use when the metadata attribute is empty
+
+fields:
+
+  # ── Identity ─────────────────────────────────────────────────────────────
+
+  product_name:
+    source: metadata.service_name
+    description: "GCP service name (e.g. bigquery, cloudsql)"
+
+  provider_name:
+    source: literal.Google Cloud Platform
+
+  module_description:
+    source: metadata.description
+    fallback: "Refer to the module README for details."
+
+  # ── Version constraints ───────────────────────────────────────────────────
+
+  terraform_version:
+    source: metadata.terraform_version
+    fallback: ">= 1.5.0"
+
+  provider_version:
+    source: metadata.provider_version
+    fallback: "~> 5.0"
+
+  # ── Resources & modules ───────────────────────────────────────────────────
+
+  resource_types_list:
+    source: metadata.resource_types
+    format: bullet_list
+
+  module_calls_list:
+    source: metadata.module_calls
+    format: bullet_list
+    fallback: "None"
+
+  # ── Input variables ───────────────────────────────────────────────────────
+
+  required_inputs_table:
+    source: metadata.required_inputs
+    format: table
+    columns: [name, type, description]
+
+  optional_inputs_table:
+    source: metadata.optional_inputs
+    format: table
+    columns: [name, type, default, description]
+
+  # ── Outputs ───────────────────────────────────────────────────────────────
+
+  outputs_table:
+    source: metadata.outputs
+    format: table
+    columns: [name, description]
+
+  # ── Documentation ─────────────────────────────────────────────────────────
+
+  readme_excerpt:
+    source: metadata.readme
+    fallback: "No README found."

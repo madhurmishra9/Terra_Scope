@@ -38,6 +38,7 @@ lxml>=5.0.0              # Fast HTML parser for BeautifulSoup
 # ── Utilities ─────────────────────────────────────────────────
 tenacity>=8.2.3          # Retry logic for Ollama calls
 rich>=13.7.0             # Pretty CLI output for indexer
+python-dotenv>=1.0.0     # .env file loading for docgen Confluence config
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=8.0.0

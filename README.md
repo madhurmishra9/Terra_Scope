@@ -2,7 +2,20 @@
 
 > **AI-powered Terraform module curation for GCP, AWS, and Azure.**  
 > Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.  
-> **v2.3** — Multi-cloud GA Workflow with incremental updates, breaking change classification, and module troubleshooter.
+> **v2.4** — Confluence Documentation Generator: automatically publish HLD, CPSD, Architectural Design, and Highly Confidential Assessment pages when a module is curated.
+
+---
+
+## What's New in v2.4
+
+| Feature | Description |
+|---------|-------------|
+| **📄 Confluence Docgen** | After curation, automatically publish HLD, CPSD, Architectural Design, and Highly Confidential Assessment pages to Confluence — cloned from a reference `.docx` template, fields bound from real module metadata, idempotent re-runs update in place |
+| **🔑 `.env` for secrets** | Confluence credentials live in `.env` (separate from `terrascope.config.yaml`); Basic or Bearer auth auto-detected |
+| **🖼️ Diagram resolution** | Auto-generates architecture diagrams via `terraform graph | dot`; falls back to folder-supplied images or labelled SVG placeholders |
+| **🏷️ Idempotency** | `data/docgen_manifest.json` tracks page IDs per product — re-running updates existing pages instead of creating duplicates; pages are also labelled `terrascope:<product>` |
+| **🧪 Dry-run mode** | `--dry-run` writes the would-be Confluence XHTML to `output/docgen_dry_run/` for review without any API calls |
+| **🖥️ CLI** | `python -m backend.module_curator.docgen.pipeline --product bigquery --module-path output/... --dry-run` |
 
 ---
 
@@ -100,6 +113,8 @@ The workflow persists applied changes to `./data/ga_state/{repo_name}.json`. On 
    - [Windows Setup](#41-windows-setup)
    - [Mac Setup](#42-mac-setup)
 5. [Configuration](#5-configuration)
+   - [terrascope.config.yaml](#51-terrascopeconfigyaml)
+   - [.env — Confluence Docgen](#52-env--confluence-docgen)
 6. [Project Structure](#6-project-structure)
 7. [Indexing Your Repos](#7-indexing-your-repos)
 8. [Running TerraScope](#8-running-terrascope)
@@ -113,13 +128,18 @@ The workflow persists applied changes to `./data/ga_state/{repo_name}.json`. On 
     - [Mode 2: From Document](#102-mode-2-from-document)
     - [Mode 3: From Module](#103-mode-3-from-module)
     - [Mode 4: Self-Curation](#104-mode-4-self-curation)
-11. [Registry Doc Fetching](#11-registry-doc-fetching)
-12. [API Reference](#12-api-reference)
-13. [Code Deep Dive](#13-code-deep-dive)
-14. [Anti-Hallucination Design](#14-anti-hallucination-design)
-15. [Supported Products](#15-supported-products)
-16. [Troubleshooting](#16-troubleshooting)
-17. [FAQ](#17-faq)
+11. [Confluence Documentation Generator](#11-confluence-documentation-generator)
+    - [How It Works](#111-how-it-works)
+    - [Template Setup](#112-template-setup)
+    - [Running Docgen](#113-running-docgen)
+    - [Dry-Run Mode](#114-dry-run-mode)
+12. [Registry Doc Fetching](#12-registry-doc-fetching)
+13. [API Reference](#13-api-reference)
+14. [Code Deep Dive](#14-code-deep-dive)
+15. [Anti-Hallucination Design](#15-anti-hallucination-design)
+16. [Supported Products](#16-supported-products)
+17. [Troubleshooting](#17-troubleshooting)
+18. [FAQ](#18-faq)
 
 ---
 
@@ -346,7 +366,9 @@ cd ..
 
 ## 5. Configuration
 
-All configuration lives in one file: **`terrascope.config.yaml`** at the project root.
+### 5.1 terrascope.config.yaml
+
+All core configuration lives in **`terrascope.config.yaml`** at the project root.
 
 ### Adding Repos
 
@@ -388,12 +410,63 @@ terrascope:
 
 ---
 
+### 5.2 .env — Confluence Docgen
+
+The documentation generator reads Confluence credentials from a **`.env`** file in the project root.  
+A fully-annotated template is provided at [`.env.example`](.env.example).
+
+```bash
+# Copy the template
+cp .env.example .env      # Mac / Linux
+copy .env.example .env    # Windows
+```
+
+Then open `.env` and fill in your values:
+
+```env
+# Required
+CONFLUENCE_BASE_URL=https://yourcompany.atlassian.net/wiki
+CONFLUENCE_API_TOKEN=your_api_token_here
+
+# Cloud — also required (Basic auth: email + token)
+CONFLUENCE_EMAIL=you@yourcompany.com
+
+# Optional — leave blank to publish to your private space
+CONFLUENCE_SPACE_KEY=ENG
+
+# Optional — root page under which all product pages nest
+CONFLUENCE_PARENT_TITLE=TerraScope Modules
+```
+
+**Auth modes:**
+
+| `CONFLUENCE_EMAIL` set? | Auth used | When to use |
+|-------------------------|-----------|-------------|
+| Yes | HTTP Basic (`email:token`) | Confluence Cloud (always required) |
+| No  | Bearer (`Authorization: Bearer <token>`) | DC / Server with PAT |
+
+**Verify the connection:**
+```bash
+curl http://localhost:8000/api/docgen/config
+```
+```json
+{ "configured": true, "message": "Confluence OK: https://... (basic auth, space=ENG)" }
+```
+
+---
+
 ## 6. Project Structure
 
 ```
 terrascope/
-├── terrascope.config.yaml              ← THE ONE CONFIG FILE
+├── terrascope.config.yaml              ← Core config (LLM, repos, grounding)
+├── .env.example                        ← Confluence credential template (copy → .env)
+├── .env                                ← Your credentials (git-ignored)
 ├── requirements.txt
+│
+├── templates/                          ← Docgen reference templates (NEW v2.4)
+│   └── example/
+│       └── field_map.yaml              ← Token → metadata mapping (copy per product)
 │
 ├── backend/
 │   ├── main.py                         ← FastAPI app + all API routes (query + curate + registry)
@@ -425,7 +498,24 @@ terrascope/
 │   │   ├── code_generator.py           ← 3-pass LLM generation → 7 output files per module
 │   │   ├── module_fetcher.py           ← GitHub clone / local dir / ZIP / .tf upload
 │   │   ├── local_repo_scanner.py       ← Scans ./repos/ for local Terraform modules (no ChromaDB needed)
-│   │   └── dependency_resolver.py      ← Recursively resolves module {} sources (local → repos → ChromaDB → registry)
+│   │   ├── dependency_resolver.py      ← Recursively resolves module {} sources (local → repos → ChromaDB → registry)
+│   │   └── docgen/                     ← Confluence doc generator (NEW v2.4)
+│   │       ├── config.py               ← .env → ConfluenceSettings (fail-fast validation)
+│   │       ├── ir.py                   ← DocumentIR + 5 node types (the pipeline contract)
+│   │       ├── manifest.py             ← Idempotency store (data/docgen_manifest.json)
+│   │       ├── pipeline.py             ← Orchestrator + DocgenRequest/Result; also a CLI
+│   │       ├── template/
+│   │       │   ├── parser.py           ← .docx XML walk → IR (preserves diagram order)
+│   │       │   └── fields.py           ← field_map.yaml loader; binds {{ token }} in IR
+│   │       ├── metadata/
+│   │       │   └── extractor.py        ← python-hcl2 → TFModuleMetadata
+│   │       ├── diagrams/
+│   │       │   └── resolver.py         ← terraform graph|dot / folder / SVG placeholder
+│   │       ├── render/
+│   │       │   └── storage_format.py   ← IR → Confluence storage-format XHTML
+│   │       └── confluence/
+│   │           ├── client.py           ← httpx REST client (create/update page, attachments)
+│   │           └── space.py            ← resolve or create private (~) space
 │   │
 │   ├── ga_workflow/                    ← GA Release automation (v2.3 multi-cloud)
 │   │   ├── ga_models.py                ← Pydantic models (CloudProvider, BreakingReason, IncrementalState)
@@ -450,8 +540,9 @@ terrascope/
 │   │   ├── google/
 │   │   ├── aws/
 │   │   └── azurerm/
-│   └── ga_state/                       ← GA workflow incremental state (auto-created)
-│       └── {repo_name}.json            ← Applied change hashes per repo
+│   ├── ga_state/                       ← GA workflow incremental state (auto-created)
+│   │   └── {repo_name}.json            ← Applied change hashes per repo
+│   └── docgen_manifest.json            ← Docgen idempotency store (auto-created)
 └── output/                             ← Generated modules (auto-created)
     └── cloud_run_20250509_143022/
         ├── main.tf
@@ -840,7 +931,150 @@ A: Follow existing snake_case, add lifecycle_enabled boolean alongside the rules
 
 ---
 
-## 11. Registry Doc Fetching
+## 11. Confluence Documentation Generator
+
+After a curation session reaches `DONE`, TerraScope can automatically publish a full documentation set to Confluence — **HLD**, **CPSD**, **Architectural Design**, and **Highly Confidential Assessment** — by cloning the structure of a reference Word document and populating it with the generated module's real metadata.
+
+### 11.1 How It Works
+
+```
+Reference .docx + Generated TF module
+        │
+        ▼
+   template/parser.py          ordered XML walk → DocumentIR
+        │                       (headings, tables, diagrams, {{ tokens }} preserved)
+        ▼
+   metadata/extractor.py        python-hcl2 → TFModuleMetadata
+        │                       (resource types, variables, outputs, versions)
+        ▼
+   template/fields.py           field_map.yaml → bind {{ token }} in every IR node
+        │
+        ▼
+   diagrams/resolver.py         per diagram:
+        │                       1. folder-supplied image  (assets_dir/<product>/)
+        │                       2. terraform graph | dot -Tpng  (HLD / Arch only)
+        │                       3. labelled SVG placeholder
+        ▼
+   render/storage_format.py     IR → Confluence storage-format XHTML
+        │
+        ▼
+   confluence/client.py         create / update page + upload attachments
+        │
+        ▼
+   manifest.py                  persist page IDs → idempotent re-runs update in place
+```
+
+Re-running docgen for the same product **updates** existing pages rather than creating duplicates, tracked via `data/docgen_manifest.json` and a `terrascope:<product>` page label.
+
+### 11.2 Template Setup
+
+Each product needs a folder under `templates/`:
+
+```
+templates/
+└── bigquery/
+    ├── bigquery.docx       ← Reference Word document with {{ token }} placeholders
+    └── field_map.yaml      ← Maps each token to a metadata source
+```
+
+**Step 1 — Add `{{ token }}` placeholders to your reference `.docx`**
+
+Open your existing HLD / CPSD / etc. Word document and replace product-specific text with tokens:
+
+| Replace | With |
+|---------|------|
+| `BigQuery` (product title) | `{{ product_name }}` |
+| Resource list | `{{ resource_types_list }}` |
+| Variables table | `{{ required_inputs_table }}` |
+| Module description | `{{ module_description }}` |
+
+Whole-paragraph placeholders (`{{ token }}` on its own line) become `FieldNode`s. Inline tokens inside existing paragraphs are also substituted.
+
+**Step 2 — Copy and edit `field_map.yaml`**
+
+```bash
+cp templates/example/field_map.yaml templates/bigquery/field_map.yaml
+```
+
+Available metadata sources:
+
+| Source | Example value |
+|--------|---------------|
+| `metadata.service_name` | `bigquery` |
+| `metadata.description` | First line of README.md |
+| `metadata.resource_types` | `["google_bigquery_dataset", ...]` |
+| `metadata.required_inputs` | dict of `{name: {type, description}}` |
+| `metadata.optional_inputs` | same, with `default` field |
+| `metadata.outputs` | dict of `{name: {description}}` |
+| `metadata.provider_version` | `~> 5.0` |
+| `metadata.terraform_version` | `>= 1.5.0` |
+| `literal.<text>` | Static string (e.g. `literal.Google Cloud Platform`) |
+
+Supported `format` values: `text` (default), `bullet_list`, `table`.
+
+### 11.3 Running Docgen
+
+**Via API — after a curation session**
+
+```bash
+# Trigger docgen for a completed session
+curl -X POST http://localhost:8000/api/curate/{SESSION_ID}/docgen \
+  -H "Content-Type: application/json" \
+  -d '{
+    "product_name": "bigquery",
+    "ref_template": "templates/bigquery/bigquery.docx",
+    "field_map":    "templates/bigquery/field_map.yaml",
+    "doc_types":    ["HLD", "CPSD", "Architectural Design", "Highly Confidential Assessment"]
+  }'
+```
+
+**Via API — standalone (no session needed)**
+
+```bash
+curl -X POST http://localhost:8000/api/docgen/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "product_name": "bigquery",
+    "module_path":  "output/bigquery_20260601_120000",
+    "ref_template": "templates/bigquery/bigquery.docx",
+    "field_map":    "templates/bigquery/field_map.yaml"
+  }'
+```
+
+**Via CLI**
+
+```bash
+# Activate venv first
+python -m backend.module_curator.docgen.pipeline \
+    --product bigquery \
+    --module-path output/bigquery_20260601_120000 \
+    --template templates/bigquery/bigquery.docx \
+    --field-map templates/bigquery/field_map.yaml
+```
+
+### 11.4 Dry-Run Mode
+
+Use `"dry_run": true` (API) or `--dry-run` (CLI) to render pages locally without making any Confluence calls. HTML files are written to `output/docgen_dry_run/`:
+
+```bash
+python -m backend.module_curator.docgen.pipeline \
+    --product bigquery \
+    --module-path output/bigquery_20260601_120000 \
+    --dry-run
+```
+
+```
+  [ok] HLD:                        output\docgen_dry_run\bigquery_hld.html
+  [ok] CPSD:                       output\docgen_dry_run\bigquery_cpsd.html
+  [ok] Architectural Design:       output\docgen_dry_run\bigquery_architectural_design.html
+  [ok] Highly Confidential Assessment: output\docgen_dry_run\bigquery_highly_confidential_assessment.html
+```
+
+Open any of these in a browser to verify layout before publishing.
+
+---
+
+## 12. Registry Doc Fetching  <!-- anchor kept for ToC -->
 
 TerraScope automatically fetches Terraform provider documentation for use in code generation.
 
@@ -922,7 +1156,7 @@ Any of these are understood by TerraScope (case-insensitive, partial matching):
 
 ---
 
-## 12. API Reference
+## 13. API Reference
 
 All endpoints at `http://localhost:8000`.
 
@@ -1080,6 +1314,72 @@ Returns `SessionView` with `result` populated:
 
 ---
 
+### Docgen Endpoints (New in v2.4)
+
+#### `GET /api/docgen/config`
+
+Check whether Confluence credentials are configured correctly.
+
+```json
+{ "configured": true, "message": "Confluence OK: https://... (basic auth, space=ENG)" }
+```
+
+When `configured` is `false`, the message contains the specific missing key.
+
+---
+
+#### `POST /api/curate/{session_id}/docgen`
+
+Generate Confluence documentation for a curation session that has reached `DONE` state. Fields not supplied in the request body are filled from the session's service name and output directory.
+
+```json
+{
+  "product_name": "bigquery",
+  "ref_template": "templates/bigquery/bigquery.docx",
+  "field_map":    "templates/bigquery/field_map.yaml",
+  "doc_types":    ["HLD", "CPSD", "Architectural Design", "Highly Confidential Assessment"],
+  "assets_dir":   null,
+  "dry_run":      false,
+  "dry_run_dir":  "output/docgen_dry_run"
+}
+```
+
+Response:
+
+```json
+{
+  "product_name": "bigquery",
+  "space_key": "ENG",
+  "dry_run": false,
+  "pages": [
+    { "doc_type": "HLD",                        "page_id": "123456", "status": "ok" },
+    { "doc_type": "CPSD",                       "page_id": "123457", "status": "ok" },
+    { "doc_type": "Architectural Design",        "page_id": "123458", "status": "ok" },
+    { "doc_type": "Highly Confidential Assessment", "page_id": "123459", "status": "ok" }
+  ]
+}
+```
+
+---
+
+#### `POST /api/docgen/run`
+
+Run the docgen pipeline directly without a curation session. Supply `module_path` (local directory) or `tf_files` (inline dict of filename → HCL content).
+
+```json
+{
+  "product_name": "bigquery",
+  "module_path":  "output/bigquery_20260601_120000",
+  "ref_template": "templates/bigquery/bigquery.docx",
+  "field_map":    "templates/bigquery/field_map.yaml",
+  "dry_run": true
+}
+```
+
+When `dry_run` is `true`, each page result contains `dry_run_path` instead of `page_id`.
+
+---
+
 ### Registry Endpoints (New in v2.0)
 
 #### `GET /api/registry/status`
@@ -1233,7 +1533,7 @@ List all supported cloud products across GCP, AWS, and Azure.
 
 ---
 
-## 13. Code Deep Dive
+## 14. Code Deep Dive
 
 ### 13.1 Config Loader (`backend/config.py`)
 
@@ -1284,11 +1584,27 @@ For `self_curation`: after writing output files, also writes root-level `.tf` fi
 
 Chunks `.tf` files at HCL block boundaries (resource/variable/output/data). Each chunk gets a rich prefix (`File: ... | Tag: ... | Type: ... | Name: ...`) for better embedding relevance. Upserts to ChromaDB in batches of 100. Collection name: `{repo_name_underscored}__{tag_underscored}` (max 63 chars).
 
-### 13.10 FastAPI Backend (`backend/main.py`)
+### 14.10 FastAPI Backend (`backend/main.py`)
 
 All routes in one file. Curation endpoints are session-based (stateless HTTP, server-side session store). File uploads use `UploadFile` from `python-multipart`. Background indexing via `BackgroundTasks` + `run_in_executor`.
 
-### 13.11 Module Troubleshooter (`backend/troubleshooter/`)
+### 14.11 Confluence Docgen (`backend/module_curator/docgen/`)
+
+Seven-module pipeline wired into two FastAPI routes and a standalone CLI.
+
+| Stage | Module | Key design |
+|-------|--------|-----------|
+| Parse | `template/parser.py` | Walks `doc.element.body` children in XML order (not the high-level python-docx lists) so heading/table/diagram sequence is preserved exactly. Images extracted via `doc.part.related_parts[r:embed]`. |
+| Bind | `template/fields.py` | `FieldMap.resolve()` dispatches on `source` type (`metadata.*`, `literal.*`), then formats the value as `text`, `bullet_list`, or `table`. Substitution covers whole-paragraph `FieldNode`s, inline `{{ token }}` in `ParagraphNode` text, and `TableNode` cells. |
+| Metadata | `metadata/extractor.py` | Reads `variables.tf`, `outputs.tf`, `main.tf`, `versions.tf` via `python-hcl2`. Works from a local directory (`extract_from_path`) or an in-memory dict (`extract_from_files`). |
+| Diagrams | `diagrams/resolver.py` | Resolution chain: `assets_dir/<product>/<slug>.<ext>` → `terraform graph\|dot -Tpng` (HLD / Arch only) → SVG placeholder. Never raises. |
+| Render | `render/storage_format.py` | Maps IR nodes to Confluence storage-format XHTML. Diagrams become `<ac:image><ri:attachment …/>` when attachment map is provided, or italic placeholder text in dry-run. |
+| Publish | `confluence/client.py` | Uses `httpx.BasicAuth` or `Authorization: Bearer` header per `auth_mode`. `create_page` / `update_page` / `upload_attachment` / `add_label`. |
+| Idempotency | `manifest.py` + `confluence/space.py` | JSON manifest at `data/docgen_manifest.json` maps product → `{parent_page_id, pages, space_key}`. Private space resolved via `GET /rest/api/user/current` → `~<accountId>`. |
+
+**IR discriminated union** — `DocumentIR.nodes` is `list[Annotated[Union[HeadingNode, ParagraphNode, TableNode, DiagramNode, FieldNode], Field(discriminator="kind")]]`. Each node carries a literal `kind` field so Pydantic round-trips cleanly to/from JSON for inspection (`ir.to_json()` / `DocumentIR.from_json()`).
+
+### 14.12 Module Troubleshooter (`backend/troubleshooter/`)
 
 Three-stage async pipeline, all reading from Git history — no working tree checkout needed:
 
@@ -1320,7 +1636,7 @@ Sends a compact representation of the module (max 6000 chars, priority order: `m
 
 ---
 
-## 14. Anti-Hallucination Design
+## 15. Anti-Hallucination Design
 
 The query agent uses 5 layers to prevent hallucinations:
 
@@ -1336,7 +1652,7 @@ The **curation generator** trades some strictness for creativity (temperature 0.
 
 ---
 
-## 15. Supported Products
+## 16. Supported Products
 
 ### GCP (Query + Curate)
 BigQuery · Cloud Storage · Dataflow · Pub/Sub · Cloud SQL · GKE · Cloud Functions · Cloud Build · Spanner · Firestore · Bigtable · Cloud Composer · Dataproc · Vertex AI · Cloud Run · Artifact Registry · Secret Manager · Memorystore · Datastream · AlloyDB · VPC · Compute Engine · IAM · DNS · Load Balancer · Cloud Armor · Cloud Tasks · Cloud Scheduler
@@ -1349,7 +1665,7 @@ Azure Functions · Blob Storage · AKS · SQL · Cosmos DB · Service Bus · Eve
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 ### Ollama offline
 ```
@@ -1386,6 +1702,24 @@ curl -X POST http://localhost:8000/api/registry/fetch \
   -d '{"provider": "google", "service_name": "Cloud Run"}'
 ```
 
+### Docgen: `CONFLUENCE_BASE_URL is not set`
+
+Copy `.env.example` to `.env` and fill in at minimum `CONFLUENCE_BASE_URL` and `CONFLUENCE_API_TOKEN`. The server must be restarted after editing `.env` (pydantic-settings caches the values at import time).
+
+### Docgen: `401 Unauthorized` from Confluence
+
+- **Cloud:** `CONFLUENCE_EMAIL` must be set (Cloud requires Basic auth: `email:token`).
+- **DC/Server:** Leave `CONFLUENCE_EMAIL` blank and use a PAT as `CONFLUENCE_API_TOKEN`.
+- Verify the token hasn't expired and has `Write` permission on the target space.
+
+### Docgen: pages are created but diagrams are missing
+
+The page is published first; attachments are uploaded afterwards. If the upload fails (non-fatal), the diagram renders as `[Diagram: <caption>]` placeholder text. Check the page labels — if `terrascope:<product>` is present the pipeline ran successfully; missing attachments are a separate issue.
+
+### Docgen: `Space '...' not found`
+
+`CONFLUENCE_SPACE_KEY` is set to a key that doesn't exist. Either correct the key or leave it blank to let TerraScope use your private space.
+
 ### ChromaDB corruption after hard shutdown
 ```bash
 # Delete the index and re-index
@@ -1398,7 +1732,7 @@ Install [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visua
 
 ---
 
-## 17. FAQ
+## 18. FAQ
 
 **Q: Does the curation pipeline require internet access?**  
 A: No. If network is unavailable, it uses the local registry doc cache. Generation works 100% offline using Ollama. The first run of each service name fetches docs; subsequent runs use the cache (72h TTL).
@@ -1435,6 +1769,21 @@ A: The static analysis (undefined references, security patterns, deprecated reso
 
 **Q: How does the version recommendation decide "safe to upgrade"?**  
 A: It parses the CHANGELOG.md for every provider version between your current version and the latest GA. A version is considered "breaking for this module" only if its `### BREAKING CHANGES` section mentions resource types that are actually used in your module. If no such breaking changes appear in the recommended version's entry, it's marked `SAFE UPGRADE`.
+
+**Q: Does docgen require a reference .docx file?**  
+A: No. If the template file doesn't exist, the pipeline generates a minimal page (title + resource list + inputs table + outputs table) from metadata alone. For branded, properly structured documentation you should supply a reference `.docx`.
+
+**Q: What happens if I run docgen twice for the same product?**  
+A: The second run calls Confluence's update-page API on the existing pages rather than creating new ones. Page IDs are tracked in `data/docgen_manifest.json`. If the manifest is deleted, the pipeline falls back to a title search before creating new pages, so you won't get duplicates.
+
+**Q: Can I generate only specific document types?**  
+A: Yes — set `"doc_types": ["HLD"]` in the API request or `--doc-types HLD` on the CLI. The default is all four types.
+
+**Q: Can I supply my own diagram images instead of the auto-generated ones?**  
+A: Yes. Create `templates/<product>/` and put images named `hld.png`, `cpsd.png`, `architectural_design.png`, `highly_confidential_assessment.png` (or `.svg`/`.jpg`). Pass `"assets_dir": "templates/<product>"` in the request. These take priority over auto-generation.
+
+**Q: Does docgen work with Confluence Data Center / Server?**  
+A: Yes. Set `CONFLUENCE_BASE_URL` to your DC/Server URL (no trailing `/wiki`), set `CONFLUENCE_API_TOKEN` to a PAT, and leave `CONFLUENCE_EMAIL` blank. The client auto-detects the API path.
 
 **Q: What Terraform providers does the Troubleshooter support?**  
 A: All three: `hashicorp/google` (GCP), `hashicorp/aws`, and `hashicorp/azurerm`. The provider is auto-detected from `versions.tf`. Security and deprecated-usage patterns are provider-specific; the LLM analysis works for any provider.

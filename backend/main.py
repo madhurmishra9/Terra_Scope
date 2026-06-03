@@ -19,6 +19,10 @@ Endpoints:
   POST /api/curate/{session_id}/set-source    — Set GitHub / local source
   POST /api/curate/{session_id}/answer        — Answer current clarifying question
   POST /api/curate/{session_id}/generate      — Trigger Terraform code generation
+  POST /api/curate/{session_id}/docgen        — Generate Confluence docs (session must be DONE)
+
+  GET  /api/docgen/config                     — Check Confluence credentials
+  POST /api/docgen/run                        — Run docgen without a curation session
 
   GET  /api/registry/status                   — Registry cache stats + network status
   POST /api/registry/fetch                    — Pre-fetch docs for a provider+service
@@ -411,6 +415,61 @@ async def curate_generate(session_id: str):
         return curator.to_view(curator.get_session(session_id))
     except Exception as exc:
         raise HTTPException(500, f"Code generation failed: {exc}")
+
+
+# ── Docgen ────────────────────────────────────────────────────────────────────
+
+from backend.module_curator.docgen.pipeline import DocgenRequest, DocgenResult, run as docgen_run
+from backend.module_curator.docgen.config import check_confluence_config
+
+
+@app.get("/api/docgen/config")
+async def docgen_config_status():
+    """Check whether Confluence credentials are configured correctly."""
+    ok, message = check_confluence_config()
+    return {"configured": ok, "message": message}
+
+
+@app.post("/api/curate/{session_id}/docgen")
+async def curate_docgen(session_id: str, request: DocgenRequest):
+    """
+    Generate Confluence documentation for a session that has reached DONE state.
+
+    The session's output_dir and service_name are used as defaults; any field
+    in DocgenRequest can override them.
+    """
+    session = curator.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    if session.status.value != "done":
+        raise HTTPException(400, f"Session is in '{session.status.value}' state; must be 'done'")
+
+    # Populate from session if caller left them blank
+    if not request.product_name and session.service_name:
+        request = request.model_copy(update={"product_name": session.service_name})
+    if not request.module_path and session.result and session.result.output_dir:
+        request = request.model_copy(update={"module_path": session.result.output_dir})
+    if not request.tf_files and session.tf_files:
+        request = request.model_copy(update={"tf_files": session.tf_files})
+
+    try:
+        result = await docgen_run(request)
+        return result.model_dump()
+    except Exception as exc:
+        raise HTTPException(500, f"Docgen failed: {exc}")
+
+
+@app.post("/api/docgen/run")
+async def docgen_run_standalone(request: DocgenRequest):
+    """
+    Run the docgen pipeline directly without a curation session.
+    Useful for re-generating docs for an existing module directory.
+    """
+    try:
+        result = await docgen_run(request)
+        return result.model_dump()
+    except Exception as exc:
+        raise HTTPException(500, f"Docgen failed: {exc}")
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
