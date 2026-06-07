@@ -25,10 +25,16 @@ def get_chroma_client() -> chromadb.ClientAPI:
         cfg = get_config()
         base = Path(__file__).parent.parent.parent.parent
         persist_path = cfg.vector_store.resolved_path(base)
-        _chroma_client = chromadb.PersistentClient(
-            path=str(persist_path),
-            settings=Settings(anonymized_telemetry=False),
-        )
+        try:
+            _chroma_client = chromadb.PersistentClient(
+                path=str(persist_path),
+                settings=Settings(anonymized_telemetry=False),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"ChromaDB failed to initialise at '{persist_path}': {exc}. "
+                "If this is a version mismatch, delete data/chromadb/ and re-index."
+            ) from exc
     return _chroma_client
 
 
@@ -127,7 +133,10 @@ def search_across_repos(
 
 def is_indexed(repo_name: str, tag: str) -> bool:
     """Check if a repo+tag combination has been indexed."""
-    client = get_chroma_client()
+    try:
+        client = get_chroma_client()
+    except Exception:
+        return False
     col_name = _collection_name(repo_name, tag)
     try:
         col = client.get_collection(col_name)

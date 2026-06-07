@@ -226,7 +226,13 @@ async def query(request: QueryRequest):
     try:
         return await run_query(request)
     except Exception as e:
-        raise HTTPException(500, detail=f"Agent error: {str(e)}")
+        import traceback
+        print(f"\n[/api/query] UNHANDLED ERROR — {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            500,
+            detail=f"Agent error — {type(e).__name__}: {e}",
+        )
 
 
 # ── Generation ────────────────────────────────────────────────────────────────

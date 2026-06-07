@@ -241,11 +241,22 @@ _generation_agent: Optional[Agent] = None
 
 def _make_model() -> OpenAIChatModel:
     cfg = get_config()
-    provider = OpenAIProvider(
-        base_url=cfg.llm.base_url.rstrip("/") + "/v1",
-        api_key="ollama",
-    )
-    return OpenAIChatModel(model_name=cfg.llm.model, provider=provider)
+    base_url = cfg.llm.base_url.rstrip("/") + "/v1"
+    try:
+        import httpx
+        from openai import AsyncOpenAI
+        openai_client = AsyncOpenAI(
+            base_url=base_url,
+            api_key="ollama",
+            http_client=httpx.AsyncClient(
+                trust_env=False,
+                timeout=httpx.Timeout(120.0),
+            ),
+        )
+        return OpenAIChatModel(model_name=cfg.llm.model, openai_client=openai_client)
+    except TypeError:
+        provider = OpenAIProvider(base_url=base_url, api_key="ollama")
+        return OpenAIChatModel(model_name=cfg.llm.model, provider=provider)
 
 
 def get_agent() -> Agent:
@@ -331,9 +342,25 @@ async def run_query(request: QueryRequest) -> AgentResponse:
         )
 
     # Build tool context
-    summary    = summarize_module(repo_name, tag)
-    top_sources = semantic_search(request.question, repo_name, tag, n_results=cfg.grounding.max_retrieval_chunks)
-    issue_match = match_known_issue(request.question)
+    try:
+        summary = summarize_module(repo_name, tag)
+    except Exception as e:
+        print(f"[query] summarize_module failed (non-fatal): {e}")
+        summary = {}
+
+    try:
+        top_sources = semantic_search(
+            request.question, repo_name, tag,
+            n_results=cfg.grounding.max_retrieval_chunks,
+        )
+    except Exception as e:
+        print(f"[query] semantic_search failed (non-fatal): {e}")
+        top_sources = []
+
+    try:
+        issue_match = match_known_issue(request.question)
+    except Exception:
+        issue_match = None
 
     context_block = _build_query_context(
         repo_cfg=repo_cfg,
