@@ -673,6 +673,27 @@ The top bar has **five views**:
 ![Chat view — repo selected, TAGS tab](docs/screenshots/01b_chat_repo_tags.png)
 *Selecting a repo switches the sidebar to the TAGS tab so you can pick the indexed version to query against.*
 
+#### 🔍 Scan all versions
+
+Don't want to pin a single tag? Click **🔍 Scan all versions** in the chat header (next to the
+repo name). Instead of querying one indexed tag, TerraScope:
+
+1. Gathers the module's most recent indexed tags (newest first, capped to bound latency).
+2. Runs the semantic search across **every** one of those versions, merges the results, and
+   re-ranks them by relevance.
+3. Instructs the LLM to name the **tag, file, and line number** for every claim — and to call
+   out whether the answer **differs across versions**.
+
+This turns "what does v2.0 do?" into "scan the whole product and tell me what changed, where,
+and why" — useful for questions like:
+
+- *"Which versions use deprecated GCS bucket settings, and where?"*
+- *"Has the IAM binding logic changed across versions? Show file & line."*
+- *"What changed between v1.0 and v2.0?"*
+
+The chat header switches to an **`ALL VERSIONS (N indexed)`** chip while this mode is active,
+and each cited source in the response shows which tag it came from.
+
 ### 9.2 Curate — Generate New Modules
 
 The Curate view has a **left config panel** and a **right Q&A + code panel**.
@@ -1239,6 +1260,18 @@ Lists all Git tags for a specific repo with indexed status.
 }
 ```
 Returns `AgentResponse` with `query_type`, `answer`, `confidence`, `grounded`, `sources[]`, `variables[]`, `resources[]`, `issue_solution`.
+
+Set `"scan_all_tags": true` (and omit `"tag"`) to search across **every indexed version** of
+the module instead of one pinned tag — see [§9.1 Scan all versions](#-scan-all-versions):
+```json
+{
+  "question": "Which versions changed the IAM binding logic, and where?",
+  "repo_name": "terraform-google-bigquery",
+  "scan_all_tags": true
+}
+```
+`tags_analyzed[]` in the response then lists every version that was scanned, and each entry
+in `sources[]` carries its own `tag` so the answer can cite tag + file + line per finding.
 
 #### `POST /api/index`
 ```json

@@ -131,6 +131,26 @@ def search_across_repos(
     return all_sources
 
 
+def search_across_tags(
+    query: str,
+    repo_name: str,
+    tags: list[str],
+    n_per_tag: int = 4,
+    max_total: int = 16,
+) -> list[SourceReference]:
+    """
+    Search the same query across multiple indexed tags/versions of one repo.
+    Each result keeps its originating `tag` (set by semantic_search from chunk
+    metadata), so callers/LLMs can cite exactly which version a finding came from.
+    Merged results are re-ranked by relevance and capped at `max_total`.
+    """
+    all_sources: list[SourceReference] = []
+    for tag in tags:
+        all_sources.extend(semantic_search(query, repo_name, tag, n_per_tag))
+    all_sources.sort(key=lambda s: s.relevance, reverse=True)
+    return all_sources[:max_total]
+
+
 def is_indexed(repo_name: str, tag: str) -> bool:
     """Check if a repo+tag combination has been indexed."""
     try:

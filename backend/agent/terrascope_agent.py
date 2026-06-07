@@ -38,7 +38,9 @@ from backend.agent.tools.hcl_tools import (
     get_all_variables, get_all_resources, get_outputs,
     get_provider_requirements, get_iam_bindings, summarize_module,
 )
-from backend.agent.tools.search_tools import semantic_search, is_indexed
+from backend.agent.tools.search_tools import (
+    semantic_search, search_across_tags, is_indexed, get_indexed_tags,
+)
 from backend.agent.tools.issue_tools import match_known_issue, issues_for_product
 from backend.agent.tools.hcl_generator import (
     build_generation_context,
@@ -285,12 +287,17 @@ def get_generation_agent() -> Agent:
     return _generation_agent
 
 
-# ── Query pipeline ─────────────────────────────────────────────────────────────
+# Cap on how many indexed versions a "scan all" query touches — bounds latency
+# (each tag costs one extra vector-store query) while still covering the
+# versions a user is realistically asking about.
+_MAX_TAGS_PER_SCAN = 6
+
 
 async def run_query(request: QueryRequest) -> AgentResponse:
     """
     Main query entry point.
-    1. Resolve repo and tag
+    1. Resolve repo and tag(s) — either one pinned tag, or (when
+       request.scan_all_tags is set) every indexed version of the module
     2. Build rich context from code tools
     3. Run query agent
     4. Post-process: enforce confidence threshold, inject sources/solutions
@@ -321,40 +328,69 @@ async def run_query(request: QueryRequest) -> AgentResponse:
             grounded=False,
         )
 
-    # Resolve tag
-    tag = request.tag or get_latest_tag(repo_name)
-    if not tag:
-        tag = "main"
+    # Resolve tag(s) to analyze
+    if request.scan_all_tags:
+        indexed = get_indexed_tags(repo_name)
+        if not indexed:
+            return AgentResponse(
+                query_type=QueryType.UNKNOWN,
+                answer=(
+                    f"Repository '{repo_name}' has no indexed versions yet. "
+                    "Please click 'Re-index' in the UI or run: python -m backend.indexer.repo_indexer"
+                ),
+                confidence=0.0,
+                grounded=False,
+                repo_name=repo_name,
+                disclaimer="Run indexing before scanning across versions.",
+            )
+        # Newest-first order from Git, filtered down to what's actually indexed.
+        ordered = [t for t in list_tags_for_repo(repo_name) if t in indexed] or indexed
+        tags = ordered[:_MAX_TAGS_PER_SCAN]
+        tag_label = f"ALL INDEXED VERSIONS ({', '.join(tags)})"
+    else:
+        tag = request.tag or get_latest_tag(repo_name)
+        if not tag:
+            tag = "main"
+        if not is_indexed(repo_name, tag):
+            return AgentResponse(
+                query_type=QueryType.UNKNOWN,
+                answer=(
+                    f"Repository '{repo_name}' at tag '{tag}' has not been indexed yet. "
+                    "Please click 'Re-index' in the UI or run: python -m backend.indexer.repo_indexer"
+                ),
+                confidence=0.0,
+                grounded=False,
+                tags_analyzed=[tag],
+                repo_name=repo_name,
+                disclaimer="Run indexing before querying.",
+            )
+        tags = [tag]
+        tag_label = tag
 
-    # Check index
-    if not is_indexed(repo_name, tag):
-        return AgentResponse(
-            query_type=QueryType.UNKNOWN,
-            answer=(
-                f"Repository '{repo_name}' at tag '{tag}' has not been indexed yet. "
-                "Please click 'Re-index' in the UI or run: python -m backend.indexer.repo_indexer"
-            ),
-            confidence=0.0,
-            grounded=False,
-            tags_analyzed=[tag],
-            repo_name=repo_name,
-            disclaimer="Run indexing before querying.",
-        )
+    multi_tag = len(tags) > 1
 
     # Build tool context
     try:
-        summary = summarize_module(repo_name, tag)
+        summary = summarize_module(repo_name, tags[0])
     except Exception as e:
         print(f"[query] summarize_module failed (non-fatal): {e}")
         summary = {}
 
     try:
-        top_sources = semantic_search(
-            request.question, repo_name, tag,
-            n_results=cfg.grounding.max_retrieval_chunks,
-        )
+        if multi_tag:
+            n_per_tag = max(2, cfg.grounding.max_retrieval_chunks // len(tags))
+            top_sources = search_across_tags(
+                request.question, repo_name, tags,
+                n_per_tag=n_per_tag,
+                max_total=cfg.grounding.max_retrieval_chunks * 2,
+            )
+        else:
+            top_sources = semantic_search(
+                request.question, repo_name, tags[0],
+                n_results=cfg.grounding.max_retrieval_chunks,
+            )
     except Exception as e:
-        print(f"[query] semantic_search failed (non-fatal): {e}")
+        print(f"[query] search failed (non-fatal): {e}")
         top_sources = []
 
     try:
@@ -364,10 +400,11 @@ async def run_query(request: QueryRequest) -> AgentResponse:
 
     context_block = _build_query_context(
         repo_cfg=repo_cfg,
-        tag=tag,
+        tag=tag_label,
         summary=summary,
         top_sources=top_sources,
         issue_match=issue_match,
+        multi_tag=multi_tag,
     )
     full_prompt = f"{context_block}\n\nQUESTION: {request.question}"
 
@@ -386,7 +423,7 @@ async def run_query(request: QueryRequest) -> AgentResponse:
 
     # Post-process
     response.repo_name     = repo_name
-    response.tags_analyzed = [tag]
+    response.tags_analyzed = tags
 
     if not response.sources and top_sources:
         response.sources = top_sources[:3]
@@ -399,7 +436,7 @@ async def run_query(request: QueryRequest) -> AgentResponse:
         response.disclaimer = (
             f"Low confidence ({response.confidence:.0%}). "
             f"The indexed code does not contain enough information to answer this reliably. "
-            f"Check that the correct tag ('{tag}') is indexed and your question refers to this module."
+            f"Check that the correct version(s) ('{tag_label}') are indexed and your question refers to this module."
         )
 
     response.grounded = len(response.sources) > 0
@@ -412,12 +449,13 @@ def _build_query_context(
     summary: dict,
     top_sources: list[SourceReference],
     issue_match: Optional[IssueSolution],
+    multi_tag: bool = False,
 ) -> str:
     parts = [
         "=== REPOSITORY CONTEXT ===",
         f"Repo: {repo_cfg.name} ({repo_cfg.display_name})",
         f"GCP Product: {repo_cfg.gcp_product}",
-        f"Tag being analyzed: {tag}",
+        f"Tag(s) being analyzed: {tag}",
         "",
         "=== MODULE SUMMARY (from code analysis) ===",
         json.dumps(summary, indent=2),
@@ -426,9 +464,18 @@ def _build_query_context(
 
     if top_sources:
         parts.append("=== MOST RELEVANT CODE CHUNKS (from semantic search) ===")
-        for i, src in enumerate(top_sources, 1):
+        if multi_tag:
             parts.append(
-                f"[Source {i}] {src.file_path} lines {src.line_start}-{src.line_end} "
+                "NOTE: these chunks were gathered across MULTIPLE versions/tags of this "
+                "module (merged and re-ranked by relevance). For EVERY claim in your "
+                "answer, name the TAG, the FILE, and the LINE NUMBER it came from, and "
+                "explain WHY that finding is relevant to the question — including "
+                "whether it differs across versions."
+            )
+        for i, src in enumerate(top_sources, 1):
+            tag_prefix = f"[tag: {src.tag}] " if multi_tag else ""
+            parts.append(
+                f"[Source {i}] {tag_prefix}{src.file_path} lines {src.line_start}-{src.line_end} "
                 f"(relevance: {src.relevance:.2f}):\n{src.snippet}"
             )
         parts.append("")

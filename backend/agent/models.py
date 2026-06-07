@@ -138,10 +138,16 @@ class GenerationResponse(BaseModel):
 # ── Request models ─────────────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
-    question:    str      = Field(min_length=3, max_length=2000)
-    repo_name:   Optional[str] = None
-    tag:         Optional[str] = None
-    strict_mode: bool = True
+    question:      str      = Field(min_length=3, max_length=2000)
+    repo_name:     Optional[str] = None
+    tag:           Optional[str] = None
+    strict_mode:   bool = True
+    scan_all_tags: bool = Field(
+        default=False,
+        description="Scan every indexed version of the module instead of a single tag, "
+                    "merging and re-ranking results so the answer can cite which version "
+                    "(tag), file, and line each finding came from.",
+    )
 
 
 class IndexRequest(BaseModel):

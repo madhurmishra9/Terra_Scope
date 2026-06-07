@@ -2405,6 +2405,7 @@ export default function TerraScope() {
   const [repos, setRepos] = useState([]);
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [selectedTag, setSelectedTag] = useState(null);
+  const [scanAllTags, setScanAllTags] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -2430,14 +2431,18 @@ export default function TerraScope() {
     const question = input.trim();
     setInput("");
     const userMsg = { id:Date.now(), role:"user", content:question,
-      meta: selectedRepo ? `${selectedRepo.name} @ ${selectedTag||"latest"}` : "All repos" };
+      meta: selectedRepo
+        ? (scanAllTags ? `${selectedRepo.name} @ ALL VERSIONS` : `${selectedRepo.name} @ ${selectedTag||"latest"}`)
+        : "All repos" };
     const agentMsg = { id:Date.now()+1, role:"agent", loading:true, response:null, error:null };
     setMessages(prev => [...prev, userMsg, agentMsg]);
     setLoading(true);
     try {
       const resp = await apiPost("/query", {
         question, repo_name: selectedRepo?.name||null,
-        tag: selectedTag||null, strict_mode:true,
+        tag: scanAllTags ? null : (selectedTag||null),
+        scan_all_tags: scanAllTags,
+        strict_mode:true,
       });
       setMessages(prev => prev.map(m => m.id===agentMsg.id ? {...m, loading:false, response:resp} : m));
     } catch (e) {
@@ -2447,7 +2452,7 @@ export default function TerraScope() {
       setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [input, loading, selectedRepo, selectedTag]);
+  }, [input, loading, selectedRepo, selectedTag, scanAllTags]);
 
   const handleIndex = async () => {
     setIndexing(true);
@@ -2605,23 +2610,47 @@ export default function TerraScope() {
         {mainView === "chat" && (
           <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
             <div style={{ height:36, borderBottom:"1px solid #21262D", display:"flex",
-              alignItems:"center", padding:"0 16px", gap:10, background:"#0D1117", flexShrink:0 }}>
-              {selectedRepo ? (
-                <>
-                  <span style={{ width:8, height:8, borderRadius:2, flexShrink:0,
-                    background: GCP_COLORS[selectedRepo.gcp_product]||GCP_COLORS.default }} />
-                  <span style={{ fontSize:11.5, color:"#C9D1D9" }}>{selectedRepo.display_name}</span>
-                  {selectedTag && (
-                    <>
-                      <span style={{ color:"#21262D" }}>›</span>
-                      <span style={{ fontFamily:"monospace", fontSize:11, color:"#58A6FF",
-                        background:"#1F6FEB11", padding:"1px 6px", borderRadius:3 }}>{selectedTag}</span>
-                      <StatusDot status={selectedRepo.indexed_tags?.includes(selectedTag) ? "ready" : "not_indexed"} />
-                    </>
-                  )}
-                </>
-              ) : (
-                <span style={{ fontSize:11, color:"#484F58" }}>Select a repo from the sidebar</span>
+              alignItems:"center", justifyContent:"space-between", padding:"0 16px", gap:10,
+              background:"#0D1117", flexShrink:0 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
+                {selectedRepo ? (
+                  <>
+                    <span style={{ width:8, height:8, borderRadius:2, flexShrink:0,
+                      background: GCP_COLORS[selectedRepo.gcp_product]||GCP_COLORS.default }} />
+                    <span style={{ fontSize:11.5, color:"#C9D1D9" }}>{selectedRepo.display_name}</span>
+                    {scanAllTags ? (
+                      <>
+                        <span style={{ color:"#21262D" }}>›</span>
+                        <span style={{ fontFamily:"monospace", fontSize:11, color:"#3FB950",
+                          background:"#3FB95011", padding:"1px 6px", borderRadius:3 }}>
+                          ALL VERSIONS ({selectedRepo.indexed_tags?.length||0} indexed)
+                        </span>
+                      </>
+                    ) : selectedTag && (
+                      <>
+                        <span style={{ color:"#21262D" }}>›</span>
+                        <span style={{ fontFamily:"monospace", fontSize:11, color:"#58A6FF",
+                          background:"#1F6FEB11", padding:"1px 6px", borderRadius:3 }}>{selectedTag}</span>
+                        <StatusDot status={selectedRepo.indexed_tags?.includes(selectedTag) ? "ready" : "not_indexed"} />
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <span style={{ fontSize:11, color:"#484F58" }}>Select a repo from the sidebar</span>
+                )}
+              </div>
+              {selectedRepo && (
+                <button onClick={() => setScanAllTags(v => !v)}
+                  title="Scan every indexed version of this module — the answer will cite which version (tag), file, and line each finding came from"
+                  style={{
+                    fontSize:10.5, padding:"4px 10px", borderRadius:5, flexShrink:0,
+                    border:`1px solid ${scanAllTags ? "#3FB95066" : "#21262D"}`,
+                    background: scanAllTags ? "#3FB95022" : "transparent",
+                    color: scanAllTags ? "#3FB950" : "#8B949E",
+                    cursor:"pointer", display:"flex", alignItems:"center", gap:6,
+                    fontFamily:"inherit", transition:"all 0.15s" }}>
+                  🔍 {scanAllTags ? "Scanning all versions" : "Scan all versions"}
+                </button>
               )}
             </div>
 
@@ -2637,7 +2666,10 @@ export default function TerraScope() {
                     <div style={{ fontSize:14, color:"#8B949E", marginBottom:6 }}>TerraScope ready</div>
                     <div style={{ fontSize:11.5, color:"#484F58", lineHeight:1.7 }}>
                       Ask about any tag, variable, resource,<br />
-                      issue, or change across your Terraform modules.
+                      issue, or change across your Terraform modules.<br />
+                      Toggle <span style={{ color:"#3FB950" }}>🔍 Scan all versions</span> to ask one
+                      question across the whole product — TerraScope cites<br />
+                      the exact tag, file, and line for every finding.
                     </div>
                   </div>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, maxWidth:480 }}>
@@ -2646,6 +2678,10 @@ export default function TerraScope() {
                       "What variables are required?",
                       "What changed between v1.0 and v2.0?",
                       "Why does plan fail with 403 on BigQuery?",
+                      ...(scanAllTags ? [
+                        "Which versions use deprecated GCS bucket settings, and where?",
+                        "Has the IAM binding logic changed across versions? Show file & line.",
+                      ] : []),
                     ].map((q,i) => (
                       <button key={i} onClick={() => setInput(q)} style={{
                         background:"#161B22", border:"1px solid #21262D", borderRadius:6,
@@ -2668,7 +2704,9 @@ export default function TerraScope() {
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={e => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                   placeholder={selectedRepo
-                    ? `Ask about ${selectedRepo.display_name} @ ${selectedTag||"latest"}…`
+                    ? (scanAllTags
+                        ? `Ask about ${selectedRepo.display_name} across all versions…`
+                        : `Ask about ${selectedRepo.display_name} @ ${selectedTag||"latest"}…`)
                     : "Select a repo first…"}
                   disabled={loading || !selectedRepo} rows={1}
                   style={{ flex:1, background:"none", border:"none", color:"#E6EDF3",
