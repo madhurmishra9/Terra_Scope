@@ -6,6 +6,19 @@
 
 ---
 
+## Screenshot Tour
+
+| | |
+|---|---|
+| **💬 Chat** — grounded Q&A over indexed modules | **🔧 Curate** — generate modules from a service name, doc, or existing module |
+| ![Chat view](docs/screenshots/01_chat.png) | ![Curate — New Product](docs/screenshots/02_curate_new_product.png) |
+| **🚀 GA Workflow** — automated provider upgrade pipeline | **🧪 Scenarios** — generate & validate test-configuration matrices |
+| ![GA Workflow](docs/screenshots/06_ga_workflow.png) | ![Scenarios](docs/screenshots/07_scenarios.png) |
+| **🔍 Troubleshoot** — bug detection + safe upgrade recommendation | **🔧 Curate** — repo + tag selected, ready to chat |
+| ![Troubleshoot](docs/screenshots/08_troubleshoot.png) | ![Chat with repo selected](docs/screenshots/01b_chat_repo_tags.png) |
+
+---
+
 ## What's New in v2.4
 
 | Feature | Description |
@@ -641,10 +654,10 @@ The `network_available` field is new in v2.0 — when `false`, the curation pipe
 
 ## 9. Using the UI
 
-The top bar has **four views**:
+The top bar has **five views**:
 
 ```
-🔭 TerraScope v2.3  [💬 Chat] [🔧 Curate] [🚀 GA Workflow] [🧪 Scenarios]
+🔭 TerraScope v2.3  [💬 Chat] [🔧 Curate] [🚀 GA Workflow] [🧪 Scenarios] [🔍 Troubleshoot]
 ```
 
 ### 9.1 Chat — Query Existing Modules
@@ -653,6 +666,12 @@ The top bar has **four views**:
 2. Select a **tag** (TAGS tab) — green dot = indexed.
 3. Type a question and press **Enter**.
 4. The response shows: query type badge · confidence meter · `✓ grounded` badge · answer · expandable source citations.
+
+![Chat view — empty state with repos indexed](docs/screenshots/01_chat.png)
+*The Chat view with the backend connected (status: gemma4 · Online · STRICT GROUNDING) and three repos indexed in the sidebar.*
+
+![Chat view — repo selected, TAGS tab](docs/screenshots/01b_chat_repo_tags.png)
+*Selecting a repo switches the sidebar to the TAGS tab so you can pick the indexed version to query against.*
 
 ### 9.2 Curate — Generate New Modules
 
@@ -669,6 +688,18 @@ After clicking Start, the right panel enters **Q&A mode** — the LLM asks up to
 
 Generated files appear in a **tabbed code viewer** with per-file Copy buttons. The output directory path is shown at the top.
 
+![Curate — New Product mode](docs/screenshots/02_curate_new_product.png)
+*New Product mode: pick a cloud provider, name the service, and start a guided Q&A session.*
+
+![Curate — From Document mode](docs/screenshots/03_curate_from_document.png)
+*From Document mode: seed curation from an uploaded PDF / DOCX / TXT spec.*
+
+![Curate — From Module mode](docs/screenshots/04_curate_from_module.png)
+*From Module mode: curate starting from an existing GitHub / local / ZIP module.*
+
+![Curate — Self-Curation mode](docs/screenshots/05_curate_self_curation.png)
+*Self-Curation mode: modify an existing repo and publish the result under a new tag.*
+
 ### 9.3 GA Workflow
 
 Select a repo in the sidebar, switch to the **🚀 GA Workflow** view, and you'll see:
@@ -679,6 +710,9 @@ Select a repo in the sidebar, switch to the **🚀 GA Workflow** view, and you'l
 - **GA Workflow tab** — configure base branch, dry run, auto-fix, then click **🚀 Run GA Workflow**
   - After completion: pipeline stage list, changes breakdown with breaking reason and migration notes, logs
 - **Cloud Scan tab** — scan the cloud service's release notes for new GA features not yet in the module
+
+![GA Workflow view](docs/screenshots/06_ga_workflow.png)
+*GA Workflow view: provider/version badges, base-branch and dry-run controls, and the "🚀 Run GA Workflow" trigger.*
 
 See [GA_WORKFLOW_README.md](./GA_WORKFLOW_README.md) for full details.
 
@@ -691,6 +725,9 @@ Switch to the **🔍 Troubleshoot** tab to analyse any module for bugs without r
 - **Tag / Branch** — dropdown of all Git tags for the selected repo (type freely if not yet cloned)
 - **Problem / Error** — optional: paste an error message or describe the symptom to guide the LLM analysis
 - **Scan Module** — starts the three-stage pipeline
+
+![Troubleshoot view](docs/screenshots/08_troubleshoot.png)
+*Troubleshoot view: pick a repo and tag/branch, optionally describe the symptom, then run the three-stage scan pipeline.*
 
 **Right panel — results:**
 
@@ -724,6 +761,18 @@ Relevant fixes in v5.12.0:
 • google_bigquery_dataset: fixed IAM binding propagation delay
 • google_storage_bucket: corrected lifecycle rule type validation
 ```
+
+### 9.5 Scenarios — Test Configuration Matrix
+
+Switch to the **🧪 Scenarios** tab to generate and validate a full matrix of test configurations for a module.
+
+1. Provide the **Module Source** — a GitHub URL, or a tag/branch of an already-configured repo.
+2. Click **Load Module**.
+3. TerraScope inspects the module's variables and generates a matrix of representative test scenarios (e.g. minimal config, full-feature config, edge cases).
+4. Each scenario can be validated independently, surfacing `terraform validate`-style errors before you ever run `plan` against real infrastructure.
+
+![Scenarios view](docs/screenshots/07_scenarios.png)
+*Scenarios view: load a module by GitHub URL or tag/branch to generate and validate a matrix of test configurations.*
 
 ---
 

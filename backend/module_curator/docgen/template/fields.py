@@ -41,14 +41,14 @@ class FieldMap:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         self._map: dict[str, dict] = raw.get("fields", {})
 
-    def resolve(self, token: str, meta: Any) -> str:
+    def resolve(self, token: str, meta: Any, doc_type: str = "") -> str:
         """Return the formatted string value for *token* using *meta* data."""
         cfg = self._map.get(token)
         if cfg is None:
             return f"[TODO: {token}]"
         source = cfg.get("source", "")
         fmt    = cfg.get("format", "text")
-        raw    = _resolve_source(source, meta, cfg)
+        raw    = _resolve_source(source, meta, cfg, doc_type=doc_type)
         return _format_value(raw, fmt, cfg)
 
     def tokens(self) -> list[str]:
@@ -57,15 +57,21 @@ class FieldMap:
 
 # ── Source resolution ─────────────────────────────────────────────────────────
 
-def _resolve_source(source: str, meta: Any, cfg: dict) -> Any:
+def _resolve_source(source: str, meta: Any, cfg: dict, doc_type: str = "") -> Any:
     if source.startswith("literal."):
         return source[len("literal."):]
+    if source == "context.doc_type":
+        return doc_type
     if source.startswith("metadata."):
         attr = source[len("metadata."):]
         value = getattr(meta, attr, None)
         if value is None or (isinstance(value, (list, dict)) and not value):
             return cfg.get("fallback", "")
         return value
+    if source.startswith("llm."):
+        section_hint = source[len("llm."):]
+        from backend.module_curator.docgen.prose.generator import generate_prose
+        return generate_prose(section_hint, meta, doc_type)
     return cfg.get("fallback", "")
 
 
@@ -109,35 +115,42 @@ def bind_fields(ir: DocumentIR, field_map: FieldMap, meta: Any) -> DocumentIR:
     """
     Return a new DocumentIR with all {{ token }} occurrences substituted.
     FieldNode.value is set; inline tokens in ParagraphNode/TableNode text
-    are replaced via regex substitution.
+    are replaced via regex substitution. ir.doc_type is forwarded so that
+    llm.* sources receive the correct document-type framing.
     """
-    new_nodes: list[IRNode] = [_bind_node(n, field_map, meta) for n in ir.nodes]
+    doc_type  = ir.doc_type
+    new_nodes = [_bind_node(n, field_map, meta, doc_type) for n in ir.nodes]
     return DocumentIR(
         nodes=new_nodes,
-        doc_type=ir.doc_type,
+        doc_type=doc_type,
         product_name=ir.product_name or getattr(meta, "service_name", ""),
-        title=_substitute(ir.title, field_map, meta),
+        title=_substitute(ir.title, field_map, meta, doc_type),
     )
 
 
-def _bind_node(node: IRNode, fm: FieldMap, meta: Any) -> IRNode:
+def _bind_node(node: IRNode, fm: FieldMap, meta: Any, doc_type: str = "") -> IRNode:
     if isinstance(node, FieldNode):
-        return FieldNode(token=node.token, value=fm.resolve(node.token, meta))
+        return FieldNode(token=node.token, value=fm.resolve(node.token, meta, doc_type))
 
     if isinstance(node, ParagraphNode):
-        return ParagraphNode(text=_substitute(node.text, fm, meta), runs=node.runs)
+        from backend.module_curator.docgen.ir import RunData
+        new_runs = [
+            RunData(text=_substitute(r.text, fm, meta, doc_type), bold=r.bold, italic=r.italic)
+            for r in node.runs
+        ]
+        return ParagraphNode(text=_substitute(node.text, fm, meta, doc_type), runs=new_runs)
 
     if isinstance(node, TableNode):
         return TableNode(
-            headers=[_substitute(h, fm, meta) for h in node.headers],
-            rows=[[_substitute(c, fm, meta) for c in row] for row in node.rows],
+            headers=[_substitute(h, fm, meta, doc_type) for h in node.headers],
+            rows=[[_substitute(c, fm, meta, doc_type) for c in row] for row in node.rows],
         )
 
     # HeadingNode and DiagramNode pass through unchanged
     return node
 
 
-def _substitute(text: str, fm: FieldMap, meta: Any) -> str:
+def _substitute(text: str, fm: FieldMap, meta: Any, doc_type: str = "") -> str:
     def _replace(m: re.Match) -> str:
-        return fm.resolve(m.group(1).strip(), meta)
+        return fm.resolve(m.group(1).strip(), meta, doc_type)
     return _TOKEN_RE.sub(_replace, text)

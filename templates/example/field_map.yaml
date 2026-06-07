@@ -76,3 +76,20 @@ fields:
   readme_excerpt:
     source: metadata.readme
     fallback: "No README found."
+
+  # ── LLM-generated prose (source: llm.<hint>) ─────────────────────────────────
+  # Calls the local LLM at temperature 0.2, grounded in module metadata.
+  # Falls back to [LLM prose unavailable: ...] on any error.
+
+  overview:
+    source: llm.overview
+
+  security_considerations:
+    source: llm.security considerations
+
+  architecture_summary:
+    source: llm.architecture summary
+
+  doc_type:
+    source: context.doc_type
+    fallback: Documentation

@@ -1071,6 +1071,167 @@ function GAWorkflowPanel({ repo, health }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  DOCGEN PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+function DocgenPanel({ sessionId, productName }) {
+  const [open,     setOpen]     = useState(false);
+  const [dryRun,   setDryRun]   = useState(false);
+  const [loading,  setLoading]  = useState(false);
+  const [result,   setResult]   = useState(null);
+  const [cfgOk,    setCfgOk]    = useState(null);   // null = unchecked
+  const [cfgMsg,   setCfgMsg]   = useState("");
+
+  // Check Confluence config when panel is first opened
+  useEffect(() => {
+    if (!open || cfgOk !== null) return;
+    apiGet("/docgen/config").then(d => {
+      setCfgOk(d.configured);
+      setCfgMsg(d.message);
+    }).catch(() => {
+      setCfgOk(false);
+      setCfgMsg("Could not reach backend.");
+    });
+  }, [open]);
+
+  const handleGenerate = async () => {
+    setLoading(true); setResult(null);
+    try {
+      const res = await apiPost(`/curate/${sessionId}/docgen`, {
+        product_name: productName,
+        dry_run: dryRun,
+      });
+      setResult(res);
+    } catch (e) {
+      setResult({ error: e.message });
+    }
+    setLoading(false);
+  };
+
+  const DOC_TYPE_COLORS = {
+    "HLD": "#58A6FF",
+    "CPSD": "#D2A8FF",
+    "Architectural Design": "#FFA657",
+    "Highly Confidential Assessment": "#F85149",
+  };
+
+  return (
+    <div style={{ borderTop:"1px solid #21262D", background:"#0D1117", flexShrink:0 }}>
+      {/* Header toggle */}
+      <div
+        onClick={() => setOpen(o => !o)}
+        style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 16px", cursor:"pointer" }}
+      >
+        <span style={{ fontSize:13 }}>📄</span>
+        <span style={{ fontSize:11.5, fontWeight:600, color:"#E6EDF3" }}>Confluence Documentation</span>
+        {cfgOk === false && open && (
+          <span style={{ fontSize:10, color:"#F85149", background:"#F8514911",
+            border:"1px solid #F8514933", borderRadius:3, padding:"1px 6px" }}>
+            not configured
+          </span>
+        )}
+        {cfgOk === true && open && (
+          <span style={{ fontSize:10, color:"#3FB950", background:"#3FB95011",
+            border:"1px solid #3FB95033", borderRadius:3, padding:"1px 6px" }}>
+            ✓ configured
+          </span>
+        )}
+        <span style={{ marginLeft:"auto", color:"#484F58", fontSize:12 }}>{open ? "▲" : "▼"}</span>
+      </div>
+
+      {open && (
+        <div style={{ padding:"10px 16px 14px", borderTop:"1px solid #21262D" }}>
+          {/* Config message */}
+          {cfgOk === false && (
+            <div style={{ fontSize:11, color:"#FFA657", background:"#FFA65711",
+              border:"1px solid #FFA65733", borderRadius:5, padding:"7px 10px", marginBottom:10,
+              lineHeight:1.5 }}>
+              ⚠ {cfgMsg}<br />
+              <span style={{ color:"#484F58" }}>
+                Set CONFLUENCE_BASE_URL and CONFLUENCE_API_TOKEN in .env to publish.
+                Dry-run still works.
+              </span>
+            </div>
+          )}
+
+          {cfgOk === null && (
+            <div style={{ fontSize:11, color:"#484F58", marginBottom:10 }}>Checking Confluence…</div>
+          )}
+
+          {/* Controls */}
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10, flexWrap:"wrap" }}>
+            <label style={{ display:"flex", alignItems:"center", gap:5, fontSize:11, color:"#8B949E", cursor:"pointer" }}>
+              <input
+                type="checkbox"
+                checked={dryRun}
+                onChange={e => setDryRun(e.target.checked)}
+                style={{ accentColor:"#58A6FF" }}
+              />
+              Dry run (write HTML locally, no Confluence calls)
+            </label>
+            <button
+              onClick={handleGenerate}
+              disabled={loading || (!cfgOk && !dryRun)}
+              style={{
+                marginLeft:"auto",
+                background: (loading || (!cfgOk && !dryRun)) ? "#21262D" : "#1F6FEB22",
+                border:`1px solid ${(loading || (!cfgOk && !dryRun)) ? "#21262D" : "#1F6FEB66"}`,
+                borderRadius:6,
+                color: (loading || (!cfgOk && !dryRun)) ? "#484F58" : "#58A6FF",
+                fontSize:11.5, fontWeight:600,
+                padding:"6px 16px", cursor: (loading || (!cfgOk && !dryRun)) ? "not-allowed" : "pointer",
+                fontFamily:"inherit",
+              }}
+            >
+              {loading ? "Generating…" : dryRun ? "Dry Run" : "Publish to Confluence"}
+            </button>
+          </div>
+
+          {/* Results */}
+          {result && !result.error && (
+            <div>
+              <div style={{ fontSize:10, color:"#484F58", textTransform:"uppercase",
+                letterSpacing:"0.06em", marginBottom:6 }}>
+                Results {result.dry_run ? "(dry run)" : `· space: ${result.space_key}`}
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                {(result.pages || []).map((p, i) => {
+                  const color = DOC_TYPE_COLORS[p.doc_type] || "#8B949E";
+                  return (
+                    <div key={i} style={{ display:"flex", alignItems:"center", gap:8,
+                      background:"#161B22", border:`1px solid ${color}22`,
+                      borderLeft:`3px solid ${p.status==="ok" ? color : "#F85149"}`,
+                      borderRadius:5, padding:"5px 10px" }}>
+                      <span style={{ fontSize:10, color, fontWeight:700, minWidth:60 }}>{p.doc_type}</span>
+                      {p.status === "ok" ? (
+                        <span style={{ fontSize:10, color:"#3FB950" }}>
+                          ✓ {p.dry_run_path
+                            ? <span style={{ fontFamily:"monospace", color:"#484F58" }}>{p.dry_run_path}</span>
+                            : `page ${p.page_id}`}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize:10, color:"#F85149" }}>✗ {p.error}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {result?.error && (
+            <div style={{ fontSize:11, color:"#F85149", background:"#F8514911",
+              border:"1px solid #F8514933", borderRadius:5, padding:"7px 10px" }}>
+              Error: {result.error}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  CURATION PANEL
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1858,14 +2019,22 @@ function CurationPanel({ repos, health }) {
       {/* ── Right panel: Q&A or code viewer ── */}
       <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
         {hasResult ? (
-          <CodeViewer
-            files={session.result.files}
-            outputDir={session.result.output_dir}
-            summary={session.result.summary}
-            usageExample={session.result.usage_example}
-            gitTag={session.result.git_tag_created ? session.result.git_tag_name : null}
-            validation={session.result.validation ?? null}
-          />
+          <>
+            <div style={{ flex:1, overflow:"hidden" }}>
+              <CodeViewer
+                files={session.result.files}
+                outputDir={session.result.output_dir}
+                summary={session.result.summary}
+                usageExample={session.result.usage_example}
+                gitTag={session.result.git_tag_created ? session.result.git_tag_name : null}
+                validation={session.result.validation ?? null}
+              />
+            </div>
+            <DocgenPanel
+              sessionId={session.session_id}
+              productName={session.service_name}
+            />
+          </>
         ) : (
           <CurationChat
             session={session}

@@ -311,11 +311,50 @@ async def generate(session_id: str) -> GenerationResult:
         result.dependent_modules  = list(session.dependent_modules)
         session.result = result
         session.status = SessionStatus.DONE
+        _trigger_docgen(session)
         return result
     except Exception as exc:
         session.status = SessionStatus.ERROR
         session.error = str(exc)
         raise
+
+
+def _trigger_docgen(session: CurationSession) -> None:
+    """Fire-and-forget Confluence docgen when credentials are configured.
+
+    Runs as a background asyncio task so it never blocks or fails the curation
+    response. Skipped silently when CONFLUENCE_BASE_URL / CONFLUENCE_API_TOKEN
+    are not set.
+    """
+    import asyncio
+
+    async def _run() -> None:
+        try:
+            from backend.module_curator.docgen.config import check_confluence_config
+            ok, _ = check_confluence_config()
+            if not ok:
+                return
+            from backend.module_curator.docgen.pipeline import DocgenRequest, run as docgen_run
+            req = DocgenRequest(
+                product_name=session.service_name or "unknown",
+                module_path=session.result.output_dir if session.result else None,
+                tf_files=dict(session.tf_files),
+            )
+            result = await docgen_run(req)
+            if result.success:
+                print(f"[docgen] Published {len(result.pages)} page(s) for '{session.service_name}'")
+            else:
+                errs = [p.error for p in result.pages if p.error]
+                print(f"[docgen] Partial failure for '{session.service_name}': {'; '.join(errs)}")
+        except Exception as exc:
+            print(f"[docgen] Auto-trigger failed (non-fatal): {exc}")
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_run())
+    except Exception:
+        pass
 
 
 # ── Private ───────────────────────────────────────────────────────────────────
