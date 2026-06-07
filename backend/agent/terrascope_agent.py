@@ -28,7 +28,7 @@ from backend.agent.models import (
     AgentResponse, QueryType, QueryRequest,
     SourceReference, IssueSolution,
     GenerateRequest, GenerationResponse, GenerationMode,
-    GeneratedFile, ValidationNote,
+    GeneratedFile, ValidationNote, ValidationLevel,
 )
 from backend.agent.tools.git_tools import (
     list_tags_for_repo, get_latest_tag, get_file_at_tag,
@@ -431,6 +431,13 @@ async def run_query(request: QueryRequest) -> AgentResponse:
     if issue_match and not response.issue_solution:
         response.issue_solution = issue_match
 
+    # Deterministic confidence backstop — never let the LLM's self-reported
+    # confidence exceed what the retrieved evidence actually supports. A fluent
+    # answer resting on thin or low-relevance sources should not be reported as
+    # high-confidence; this is the anti-hallucination check on the score itself.
+    evidence_confidence = _evidence_confidence(response.sources, has_issue_match=bool(response.issue_solution))
+    response.confidence = round(min(response.confidence, evidence_confidence), 3)
+
     threshold = cfg.grounding.min_confidence_threshold
     if response.confidence < threshold:
         response.disclaimer = (
@@ -441,6 +448,34 @@ async def run_query(request: QueryRequest) -> AgentResponse:
 
     response.grounded = len(response.sources) > 0
     return response
+
+
+def _evidence_confidence(sources: list[SourceReference], has_issue_match: bool = False) -> float:
+    """
+    Deterministic confidence estimate derived purely from retrieval evidence —
+    independent of, and a ceiling on, the LLM's self-reported `confidence`.
+
+    Weighs:
+    - how many relevant code chunks were found (more corroborating files = higher),
+    - how relevant those chunks are (mean relevance score from the vector search),
+    - whether a curated known-issue match backs the answer (a vetted KB signal).
+
+    Returns 0.0 when there is no supporting evidence at all, so an ungrounded
+    answer can never be reported as confident regardless of how fluent it reads.
+    """
+    base = 0.0
+    if sources:
+        avg_relevance = sum(s.relevance for s in sources) / len(sources)
+        # 1 source corroborates but doesn't confirm; 2+ sources can approach full marks.
+        count_factor  = min(1.0, 0.55 + 0.20 * (len(sources) - 1))
+        base = avg_relevance * count_factor
+
+    if has_issue_match:
+        # A curated KB match is a strong, pre-vetted signal even without
+        # matching code chunks — but code evidence can still push it higher.
+        base = max(base, 0.7)
+
+    return round(min(1.0, base), 3)
 
 
 def _build_query_context(
@@ -524,7 +559,7 @@ async def run_generation(request: GenerateRequest) -> GenerationResponse:
             target_module=request.target_module,
             files=[],
             validation_notes=[ValidationNote(
-                level="error",
+                level=ValidationLevel.ERROR,
                 file="",
                 message=f"LLM generation failed: {e}. Check that Ollama is running with a capable model.",
             )],
@@ -544,7 +579,7 @@ async def run_generation(request: GenerateRequest) -> GenerationResponse:
             target_module=request.target_module,
             files=[],
             validation_notes=[ValidationNote(
-                level="error",
+                level=ValidationLevel.ERROR,
                 file="",
                 message=(
                     "No files could be parsed from LLM output. "

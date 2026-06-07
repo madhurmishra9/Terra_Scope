@@ -1305,6 +1305,26 @@ function HighlightedCode({ content, filename = "" }) {
       </pre>
     );
   }
+  // Unified-diff detection mirrors the heuristic hcl_generator uses to set is_diff
+  // (`content.startswith("---") or content.startswith("@@")`), so coloring kicks in
+  // regardless of which pipeline produced the content.
+  if (/^(---|\+\+\+|@@ )/.test(content.trimStart())) {
+    return (
+      <pre style={{ margin:0, padding:"12px 16px", fontSize:11.5, lineHeight:1.7,
+        fontFamily:"monospace", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
+        {content.split("\n").map((line, i) => {
+          const isHunk    = line.startsWith("@@");
+          const isFileHdr = line.startsWith("---") || line.startsWith("+++");
+          const isAdded   = !isFileHdr && line.startsWith("+");
+          const isRemoved = !isFileHdr && line.startsWith("-");
+          const color = isHunk ? "#58A6FF" : isFileHdr ? "#8B949E"
+            : isAdded ? "#3FB950" : isRemoved ? "#F85149" : "#C9D1D9";
+          const bg = isHunk ? "#58A6FF10" : isAdded ? "#3FB95014" : isRemoved ? "#F8514914" : "transparent";
+          return <span key={i} style={{ display:"block", background:bg, color }}>{line}</span>;
+        })}
+      </pre>
+    );
+  }
   return (
     <pre style={{ margin:0, padding:"12px 16px", fontSize:11.5, lineHeight:1.7,
       fontFamily:"monospace", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>

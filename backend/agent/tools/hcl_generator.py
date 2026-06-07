@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from backend.agent.models import GeneratedFile, ValidationNote
+from backend.agent.models import GeneratedFile, ValidationNote, ValidationLevel
 from backend.agent.tools.git_tools import get_file_at_tag, list_tf_files_at_tag, get_latest_tag
 from backend.config import get_config
 
@@ -580,27 +580,27 @@ def _check_security(f: GeneratedFile) -> list[ValidationNote]:
 
     if '"inherited"' in c and "public_access_prevention" in c:
         notes.append(ValidationNote(
-            level="security", file=f.path,
+            level=ValidationLevel.SECURITY, file=f.path,
             message='public_access_prevention = "inherited" — change to "enforced"',
         ))
     if re.search(r'internal_ip_only\s*=\s*false', c):
         notes.append(ValidationNote(
-            level="security", file=f.path,
+            level=ValidationLevel.SECURITY, file=f.path,
             message="internal_ip_only = false exposes VMs to public internet",
         ))
     if "WORKER_IP_PUBLIC" in c:
         notes.append(ValidationNote(
-            level="security", file=f.path,
+            level=ValidationLevel.SECURITY, file=f.path,
             message="Dataflow ip_configuration = WORKER_IP_PUBLIC — prefer WORKER_IP_PRIVATE",
         ))
     if re.search(r'"0\.0\.0\.0/0"', c):
         notes.append(ValidationNote(
-            level="security", file=f.path,
+            level=ValidationLevel.SECURITY, file=f.path,
             message="0.0.0.0/0 CIDR found — verify this is intentional",
         ))
     if re.search(r'deletion_protection\s*=\s*false', c) and "variables.tf" not in f.path:
         notes.append(ValidationNote(
-            level="security", file=f.path,
+            level=ValidationLevel.SECURITY, file=f.path,
             message="deletion_protection = false on a non-variable resource — consider setting true",
         ))
     return notes
@@ -612,24 +612,24 @@ def _check_lint(f: GeneratedFile) -> list[ValidationNote]:
 
     if re.search(r'\bcount\s*=\s*\d', c) and "for_each" not in c:
         notes.append(ValidationNote(
-            level="lint", file=f.path,
+            level=ValidationLevel.LINT, file=f.path,
             message="count= found — prefer for_each for resource iteration",
         ))
     if re.search(r'^\s*depends_on\s*=', c, re.MULTILINE):
         notes.append(ValidationNote(
-            level="lint", file=f.path,
+            level=ValidationLevel.LINT, file=f.path,
             message="depends_on found — prefer implicit dependencies via attribute references",
         ))
     # Hardcoded project IDs (8+ digit numbers in strings that aren't vars)
     if re.search(r'"[0-9]{8,}"', c):
         notes.append(ValidationNote(
-            level="lint", file=f.path,
+            level=ValidationLevel.LINT, file=f.path,
             message="Possible hardcoded project/numeric ID — use var.project_id instead",
         ))
     # Inline sensitive values
     if re.search(r'(?:password|secret|key)\s*=\s*"[^$][^"]{4,}"', c, re.IGNORECASE):
         notes.append(ValidationNote(
-            level="security", file=f.path,
+            level=ValidationLevel.SECURITY, file=f.path,
             message="Possible hardcoded secret/password/key — use var.* with sensitive=true",
         ))
     return notes
@@ -645,12 +645,12 @@ def _check_variable_completeness(f: GeneratedFile) -> list[ValidationNote]:
     for name, body in var_blocks:
         if "description" not in body:
             notes.append(ValidationNote(
-                level="lint", file=f.path,
+                level=ValidationLevel.LINT, file=f.path,
                 message=f'Variable "{name}" is missing description',
             ))
         if "type" not in body:
             notes.append(ValidationNote(
-                level="lint", file=f.path,
+                level=ValidationLevel.LINT, file=f.path,
                 message=f'Variable "{name}" is missing explicit type',
             ))
     return notes
@@ -665,7 +665,7 @@ def _check_output_completeness(f: GeneratedFile) -> list[ValidationNote]:
     for name, body in out_blocks:
         if "description" not in body:
             notes.append(ValidationNote(
-                level="lint", file=f.path,
+                level=ValidationLevel.LINT, file=f.path,
                 message=f'Output "{name}" is missing description',
             ))
     return notes
@@ -679,12 +679,12 @@ def _check_versions(f: GeneratedFile) -> list[ValidationNote]:
     # Exact pin detection: version = "5.40.0" instead of ~> or >= constraint
     if re.search(r'version\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', c):
         notes.append(ValidationNote(
-            level="lint", file=f.path,
+            level=ValidationLevel.LINT, file=f.path,
             message="Exact version pin in required_providers — use ~> or >= constraint for modules",
         ))
     if "required_version" not in c:
         notes.append(ValidationNote(
-            level="lint", file=f.path,
+            level=ValidationLevel.LINT, file=f.path,
             message="versions.tf is missing required_version constraint",
         ))
     return notes
@@ -695,7 +695,7 @@ def _validate_diff(f: GeneratedFile) -> list[ValidationNote]:
     # Verify it looks like a real unified diff
     if not (f.content.startswith("---") or f.content.startswith("@@")):
         notes.append(ValidationNote(
-            level="info", file=f.path,
+            level=ValidationLevel.INFO, file=f.path,
             message="File marked as diff but content does not start with --- or @@ markers",
         ))
     return notes

@@ -97,9 +97,17 @@ class GeneratedFile(BaseModel):
     description: str   = ""     # What this file does / what changed
 
 
+class ValidationLevel(str, Enum):
+    SECURITY = "security"
+    COST     = "cost"
+    LINT     = "lint"
+    INFO     = "info"
+    ERROR    = "error"
+
+
 class ValidationNote(BaseModel):
     """A single validation finding from the post-generation checks."""
-    level:   str            # security | cost | lint | info | error
+    level:   ValidationLevel
     file:    str            # relative file path (or "" for module-level)
     message: str
     line:    Optional[int] = None
