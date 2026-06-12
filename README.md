@@ -235,7 +235,7 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 │                                 │                   │                    │ │
 │                                 │  ┌────────────────▼─────────────────┐  │ │
 │                                 │  │  Ollama   :11434                  │  │ │
-│                                 │  │  LLM: gemma4:12b                   │  │ │
+│                                 │  │  LLM: qwen2.5-coder:7b                   │  │ │
 │                                 │  │  Embeddings: nomic-embed-text     │  │ │
 │                                 │  └──────────────────────────────────┘  │ │
 │                                 │                                        │ │
@@ -299,7 +299,7 @@ Download and run from [ollama.com/download](https://ollama.com/download). Ollama
 **Step 2 — Pull models**
 
 ```powershell
-ollama pull gemma4:12b          # LLM (~2.5 GB)
+ollama pull qwen2.5-coder:7b          # LLM (~2.5 GB)
 ollama pull nomic-embed-text   # Embeddings (~274 MB)
 ollama list                    # Verify both appear
 ```
@@ -357,7 +357,7 @@ brew services start ollama
 brew install python@3.12 node
 
 # Pull models
-ollama pull gemma4:12b
+ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
 
 # Clone TerraScope
@@ -407,7 +407,7 @@ terrascope:
   llm:
     provider: ollama
     base_url: http://localhost:11434
-    model: gemma4:12b              # Change to gemma3:12b for better quality (needs 8 GB RAM)
+    model: qwen2.5-coder:7b              # Change to gemma3:12b for better quality (needs 8 GB RAM)
     embedding_model: nomic-embed-text
     temperature: 0.0              # Keep at 0.0 for deterministic, fact-only answers
     max_tokens: 2048
@@ -649,7 +649,7 @@ cd frontend && TERRASCOPE_NO_BACKEND=1 npm run dev
 curl http://localhost:8000/api/health
 ```
 ```json
-{ "status": "ok", "ollama": "running", "model": "gemma4:12b", "repos_configured": 3, "grounding_mode": "strict" }
+{ "status": "ok", "ollama": "running", "model": "qwen2.5-coder:7b", "repos_configured": 3, "grounding_mode": "strict" }
 ```
 
 ---
@@ -1205,7 +1205,7 @@ All endpoints at `http://localhost:8000`.
 {
   "status": "ok",
   "ollama": "running",
-  "model": "gemma4:12b",
+  "model": "qwen2.5-coder:7b",
   "repos_configured": 3,
   "grounding_mode": "strict",
   "network_available": true
@@ -1714,9 +1714,9 @@ Azure Functions · Blob Storage · AKS · SQL · Cosmos DB · Service Bus · Eve
 
 ### Model not found during curation
 ```
-Error code: 404 - {'error': {'message': "model 'gemma4:12b' not found"}}
+Error code: 404 - {'error': {'message': "model 'qwen2.5-coder:7b' not found"}}
 ```
-Run `ollama pull gemma4:12b` and wait for the download to complete.
+Run `ollama pull qwen2.5-coder:7b` and wait for the download to complete.
 
 ### PDF extraction returns blank
 `pdfplumber` works on text-based PDFs. Scanned documents need OCR pre-processing (not included). Convert to text or DOCX first.
@@ -1776,7 +1776,7 @@ Install [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visua
 A: No. If network is unavailable, it uses the local registry doc cache. Generation works 100% offline using Ollama. The first run of each service name fetches docs; subsequent runs use the cache (72h TTL).
 
 **Q: How long does code generation take?**  
-A: Typically 45–120 seconds with `gemma4:12b` (3 LLM passes). A larger model like `gemma3:12b` improves quality at the cost of 2–3× more time per pass.
+A: Typically 45–120 seconds with `qwen2.5-coder:7b` (3 LLM passes). A larger model like `gemma3:12b` improves quality at the cost of 2–3× more time per pass.
 
 **Q: Can I generate modules for services not in the known service map?**  
 A: Yes. Enter any service name — TerraScope will construct a plausible resource name (e.g. `google_my_service`) and generate code based on the Q&A answers alone. For best results, prime the cache first or ensure network access so it can scrape the registry.
@@ -1803,7 +1803,7 @@ A: Yes — it reads `.tf` file contents from the local Git history via `git show
 A: Yes. The troubleshooter reads from your local Git history, so any tag that exists in the local clone (even if deleted from the remote) is analysable. Select it from the Tag dropdown.
 
 **Q: How accurate is the LLM analysis in the Troubleshooter?**  
-A: The static analysis (undefined references, security patterns, deprecated resources, provider constraints) is fully deterministic. The LLM stage adds logical analysis — quality depends on the model. With `gemma4:12b` expect good coverage of obvious anti-patterns; a larger model (`gemma3:12b`) gives more thorough results. Always review LLM suggestions — they can occasionally flag false positives.
+A: The static analysis (undefined references, security patterns, deprecated resources, provider constraints) is fully deterministic. The LLM stage adds logical analysis — quality depends on the model. With `qwen2.5-coder:7b` expect good coverage of obvious anti-patterns; a larger model (`gemma3:12b`) gives more thorough results. Always review LLM suggestions — they can occasionally flag false positives.
 
 **Q: How does the version recommendation decide "safe to upgrade"?**  
 A: It parses the CHANGELOG.md for every provider version between your current version and the latest GA. A version is considered "breaking for this module" only if its `### BREAKING CHANGES` section mentions resource types that are actually used in your module. If no such breaking changes appear in the recommended version's entry, it's marked `SAFE UPGRADE`.

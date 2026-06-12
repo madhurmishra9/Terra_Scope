@@ -194,7 +194,7 @@ def _generate_doc(
         ir = (
             parse_docx(ref_path, product_name=meta.service_name, doc_type=doc_type)
             if ref_path.exists()
-            else _minimal_ir(meta, doc_type)
+            else _minimal_ir(meta, doc_type, has_module=bool(module_dir and module_dir.exists()))
         )
 
         # Bind field values
@@ -315,51 +315,77 @@ def _extract_metadata(req: DocgenRequest) -> TFModuleMetadata:
     return TFModuleMetadata(service_name=req.product_name)
 
 
-def _minimal_ir(meta: TFModuleMetadata, doc_type: str) -> DocumentIR:
+def _minimal_ir(meta: TFModuleMetadata, doc_type: str, has_module: bool = False) -> DocumentIR:
     """
-    Rich default IR built programmatically when no reference .docx is present.
+    Research-document IR built programmatically when no reference .docx exists.
 
-    Lays out a full product document using every available field_map token, so
-    a brand-new (un-curated) product still gets a complete, structured page:
-    overview, features, required APIs, IAM roles, resources, inputs, outputs,
-    security considerations, and links to the official Google docs.
+    Pre-curation mode (has_module=False, the default): a design/research doc
+    grounded in Google's official documentation — no module tables.
+    Post-curation mode (has_module=True): the same doc plus the module's
+    resources/inputs/outputs tables and version constraints.
     """
     from backend.module_curator.docgen.ir import FieldNode, HeadingNode, ParagraphNode
-    title = f"{meta.service_name.title()} — {doc_type}"
+    suffix = doc_type if has_module else f"{doc_type} — Research"
+    title = f"{meta.service_name.title()} — {suffix}"
     nodes = [
         HeadingNode(level=1, text=title),
 
         HeadingNode(level=2, text="Overview"),
         FieldNode(token="product_overview"),
 
+        HeadingNode(level=2, text="Architecture"),
+        FieldNode(token="architecture_notes"),
+
         HeadingNode(level=2, text="Key Features"),
         FieldNode(token="key_features_list"),
+
+        HeadingNode(level=2, text="Use Cases"),
+        FieldNode(token="use_cases_list"),
+
+        HeadingNode(level=2, text="Terraform Design Considerations"),
+        FieldNode(token="terraform_design_considerations_list"),
 
         HeadingNode(level=2, text="Required Google Cloud APIs"),
         FieldNode(token="apis_required_list"),
 
-        HeadingNode(level=2, text="Common IAM Roles"),
-        FieldNode(token="common_roles_list"),
+        HeadingNode(level=2, text="IAM Design"),
+        FieldNode(token="iam_design_list"),
+    ]
 
-        HeadingNode(level=2, text="Terraform Resources Managed"),
-        FieldNode(token="resource_types_list"),
+    # Module-grounded sections only when a real module was provided —
+    # never render empty tables in a pre-curation research doc.
+    if has_module:
+        nodes += [
+            HeadingNode(level=2, text="Terraform Resources Managed"),
+            FieldNode(token="resource_types_list"),
 
-        HeadingNode(level=2, text="Required Inputs"),
-        FieldNode(token="required_inputs_table"),
+            HeadingNode(level=2, text="Required Inputs"),
+            FieldNode(token="required_inputs_table"),
 
-        HeadingNode(level=2, text="Optional Inputs"),
-        FieldNode(token="optional_inputs_table"),
+            HeadingNode(level=2, text="Optional Inputs"),
+            FieldNode(token="optional_inputs_table"),
 
-        HeadingNode(level=2, text="Outputs"),
-        FieldNode(token="outputs_table"),
+            HeadingNode(level=2, text="Outputs"),
+            FieldNode(token="outputs_table"),
 
-        HeadingNode(level=2, text="Version Constraints"),
-        ParagraphNode(text="Terraform: {{terraform_version}} · Provider: {{provider_version}}"),
+            HeadingNode(level=2, text="Version Constraints"),
+            ParagraphNode(text="Terraform: {{terraform_version}} · Provider: {{provider_version}}"),
+        ]
 
+    nodes += [
         HeadingNode(level=2, text="Security Considerations"),
         FieldNode(token="security_considerations_list"),
 
-        HeadingNode(level=2, text="Official Documentation"),
+        HeadingNode(level=2, text="Limits & Quotas"),
+        FieldNode(token="limits_and_quotas_list"),
+
+        HeadingNode(level=2, text="Cost Considerations"),
+        FieldNode(token="cost_notes"),
+
+        HeadingNode(level=2, text="Open Questions for Curation"),
+        FieldNode(token="open_questions_list"),
+
+        HeadingNode(level=2, text="Official Documentation References"),
         FieldNode(token="official_docs_links"),
     ]
     return DocumentIR(

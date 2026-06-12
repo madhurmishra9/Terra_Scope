@@ -2,7 +2,7 @@
 planner.py — PydanticAI Agent that produces a ScenarioPlan from a ModuleSpec.
 
 The agent only picks VALUES and NAMES; the gate/variable list comes from the
-already-deterministically-built ModuleSpec. A repair loop handles gemma4:12b's
+already-deterministically-built ModuleSpec. A repair loop handles qwen2.5-coder:7b's
 tendency to emit non-JSON or truncated output.
 """
 from __future__ import annotations

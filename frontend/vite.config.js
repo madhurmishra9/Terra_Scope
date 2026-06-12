@@ -90,6 +90,10 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+        // No proxy timeouts: docgen/curation endpoints make many sequential
+        // local-LLM calls and can legitimately run >5 min. A proxyTimeout here
+        // destroys the upstream socket mid-request ("socket hang up") while
+        // the backend is still working.
         // Retry proxy requests for a few seconds while the backend boots
         configure: (proxy) => {
           proxy.on('error', (_err, _req, res) => {

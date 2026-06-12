@@ -51,13 +51,34 @@ def _collection_name(repo_name: str, tag: str) -> str:
 
 
 def _get_embedding_fn():
-    """Return ChromaDB-compatible embedding function using Ollama."""
+    """Proxy-safe Ollama embedding function (trust_env=False, never proxied)."""
     cfg = get_config()
     try:
-        from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
-        return OllamaEmbeddingFunction(
+        import httpx
+        from chromadb import EmbeddingFunction, Documents, Embeddings
+
+        class ProxySafeOllamaEmbedding(EmbeddingFunction):
+            def __init__(self, url: str, model: str):
+                self._url = url
+                self._model = model
+                # trust_env=False: corporate HTTP(S)_PROXY vars must never
+                # intercept local Ollama traffic (causes silent hangs).
+                self._client = httpx.Client(trust_env=False, timeout=60.0)
+
+            def __call__(self, input: Documents) -> Embeddings:
+                out = []
+                for text in input:
+                    r = self._client.post(
+                        self._url,
+                        json={"model": self._model, "prompt": text},
+                    )
+                    r.raise_for_status()
+                    out.append(r.json()["embedding"])
+                return out
+
+        return ProxySafeOllamaEmbedding(
             url=cfg.llm.base_url.rstrip("/") + "/api/embeddings",
-            model_name=cfg.llm.embedding_model,
+            model=cfg.llm.embedding_model,
         )
     except Exception:
         # Fallback: default embeddings (less accurate but functional)

@@ -119,7 +119,7 @@ def get_all_settings() -> dict:
         "llm": {
             "provider":        ts.get("llm", {}).get("provider", "ollama"),
             "base_url":        ts.get("llm", {}).get("base_url", "http://localhost:11434"),
-            "model":           ts.get("llm", {}).get("model", "gemma4:12b"),
+            "model":           ts.get("llm", {}).get("model", "qwen2.5-coder:7b"),
             "embedding_model": ts.get("llm", {}).get("embedding_model", "nomic-embed-text"),
             "temperature":     ts.get("llm", {}).get("temperature", 0.0),
             "max_tokens":      ts.get("llm", {}).get("max_tokens", 2048),

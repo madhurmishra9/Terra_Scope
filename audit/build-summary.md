@@ -124,15 +124,15 @@ Loops up to `max_fix_iters` (config key).
 
 ---
 
-## Known gemma4:12b Limitations
+## Known qwen2.5-coder:7b Limitations
 
-- **Non-JSON output**: gemma4:12b often prefixes JSON with prose or markdown fences.
+- **Non-JSON output**: qwen2.5-coder:7b often prefixes JSON with prose or markdown fences.
   PydanticAI's output_type extraction handles this better than raw `json.loads`,
   but very long outputs may still be truncated mid-object. The repair loop addresses
   truncation by re-asking with a simpler prompt.
 
 - **ScenarioPlan complexity**: The planner prompt is deliberately detailed to force
-  correct structure, but gemma4:12b may produce fewer scenarios than requested.
+  correct structure, but qwen2.5-coder:7b may produce fewer scenarios than requested.
   The `_deterministic_fallback` always produces a valid minimal+maximal+gate matrix.
 
 - **Temperature**: temperature=0.0 is used for all factual stages. Only the

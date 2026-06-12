@@ -83,15 +83,48 @@ fields:
     source: metadata.overview
     fallback: "Refer to the official Google Cloud documentation for an overview."
 
+  architecture_notes:
+    source: metadata.architecture_notes
+    fallback: "Not covered in referenced documentation."
+
   key_features_list:
     source: metadata.key_features
     format: bullet_list
     fallback: "See official documentation."
 
+  use_cases_list:
+    source: metadata.use_cases
+    format: bullet_list
+    fallback: "Not covered in referenced documentation."
+
+  terraform_design_considerations_list:
+    source: metadata.terraform_design_considerations
+    format: bullet_list
+    fallback: "Review the Terraform provider documentation for available resources and arguments."
+
+  iam_design_list:
+    source: metadata.iam_design
+    format: bullet_list
+    fallback: "Apply least-privilege IAM using the service's predefined roles."
+
   security_considerations_list:
     source: metadata.security_considerations
     format: bullet_list
     fallback: "Follow Google Cloud security best practices and least-privilege IAM."
+
+  limits_and_quotas_list:
+    source: metadata.limits_and_quotas
+    format: bullet_list
+    fallback: "Not covered in referenced documentation."
+
+  cost_notes:
+    source: metadata.cost_notes
+    fallback: "Refer to the official pricing page."
+
+  open_questions_list:
+    source: metadata.open_questions
+    format: bullet_list
+    fallback: "To be gathered during the curation session."
 
   apis_required_list:
     source: metadata.apis_required

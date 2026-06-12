@@ -2,7 +2,7 @@ terrascope:
   llm:
     provider: ollama
     base_url: http://localhost:11434
-    model: gemma4:12b
+    model: qwen2.5-coder:7b
     embedding_model: nomic-embed-text
     temperature: 0.0
     max_tokens: 2048
@@ -48,6 +48,16 @@ repos:
   description: Terraform modules for Google Dataflow pipelines
   enabled: true
 gcp_products:
+  filestore:
+    apis:
+    - file.googleapis.com
+    common_roles:
+    - roles/file.editor
+    - roles/file.viewer
+    provider_resources:
+    - google_filestore_instance
+    - google_filestore_backup
+    - google_filestore_snapshot
   bigquery:
     apis:
     - bigquery.googleapis.com

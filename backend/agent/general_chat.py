@@ -15,6 +15,8 @@ general / mixed), and per-repo sources.
 """
 from __future__ import annotations
 
+import re
+
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -85,11 +87,11 @@ def _build_prompt(
             "when you use these; they are the ground truth for questions "
             "about the user's own modules):\n"
         )
-        for s in sources[:8]:
+        for s in sources[:5]:
             parts.append(
                 f"--- {s.repo_name} @ {s.tag} · {s.file_path} "
                 f"(lines {s.line_start}-{s.line_end}, relevance {s.relevance}) ---\n"
-                f"{s.snippet}\n"
+                f"{s.snippet[:600]}\n"
             )
         parts.append(
             "\nIf the question is about the user's modules, answer ONLY from "
@@ -116,9 +118,52 @@ def _build_prompt(
     return "\n".join(parts)
 
 
+
+# ── Fast-path: answer repo-availability questions without the LLM ─────────────
+
+_REPO_LIST_PAT = re.compile(
+    r"\b(what|which|list|show|available)\b.*\b(modules?|repos?|repositories)\b"
+    r"|\b(modules?|repos?|repositories)\b.*\b(available|indexed|added|query)\b",
+    re.IGNORECASE,
+)
+
+
+def _try_fast_repo_answer(question: str) -> Optional[GeneralChatResponse]:
+    """Instant deterministic answer for 'what repos/modules are available?'."""
+    if not _REPO_LIST_PAT.search(question):
+        return None
+    cfg = get_config()
+    lines = []
+    indexed = _collect_indexed_repos()
+    for repo in cfg.enabled_repos:
+        tag = None
+        try:
+            tag = get_latest_tag(repo.name)
+        except Exception:
+            pass
+        status = "✓ indexed" if repo.name in indexed else "○ not indexed yet"
+        lines.append(f"• {repo.name}" + (f" (latest tag {tag})" if tag else "") + f" — {status}")
+    if not lines:
+        answer = ("No repos are configured yet. Add repos under the `repos:` "
+                  "section of terrascope.config.yaml, then index them from the sidebar.")
+    else:
+        answer = ("Configured repos:\n" + "\n".join(lines) +
+                  "\n\nIndexed repos can be queried here or in Repo Chat. "
+                  "Un-indexed ones need indexing first (sidebar → Index).")
+    return GeneralChatResponse(
+        answer=answer, mode="grounded", sources=[],
+        repos_searched=list(indexed.keys()), confidence=1.0,
+    )
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def run_general_chat(req: GeneralChatRequest) -> GeneralChatResponse:
+    # Instant answer for repo-availability questions — no embeddings, no LLM
+    fast = _try_fast_repo_answer(req.question)
+    if fast is not None:
+        return fast
+
     cfg = get_config()
 
     # 1. Search every indexed repo (best-effort)
@@ -142,13 +187,13 @@ async def run_general_chat(req: GeneralChatRequest) -> GeneralChatResponse:
         client = AsyncOpenAI(
             base_url=base_url,
             api_key="ollama",
-            http_client=httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(120.0)),
+            http_client=httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(300.0)),
         )
         resp = await client.chat.completions.create(
             model=cfg.llm.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,                      # slightly creative for chat
-            max_tokens=cfg.llm.max_tokens,
+            max_tokens=min(cfg.llm.max_tokens, 1024),   # chat answers stay snappy
         )
         answer = (resp.choices[0].message.content or "").strip()
     except Exception as e:

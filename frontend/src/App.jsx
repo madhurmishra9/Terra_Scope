@@ -1470,7 +1470,7 @@ function CurationChat({ session, onAnswer, onGenerate, generating }) {
               </div>
             ))}
             <div style={{ fontSize:10, color:"#484F58", marginTop:10 }}>
-              3 LLM passes — typically 45–120 seconds with gemma4:12b
+              3 LLM passes — typically 45–120 seconds with qwen2.5-coder:7b
             </div>
           </div>
         )}
@@ -1658,10 +1658,10 @@ function DocsPanel({ repos, health }) {
           <div style={sectionStyle}>
             <label style={labelStyle}>Module Path <span style={{textTransform:"none"}}>(optional)</span></label>
             <input value={modulePath} onChange={e => setModulePath(e.target.value)}
-              placeholder="output/bigquery_2025…  — leave blank to doc by name only"
+              placeholder="Leave blank for pre-curation research docs"
               style={inputStyle} />
             <div style={{ fontSize:9.5, color:"#484F58", marginTop:4, lineHeight:1.4 }}>
-              If set, inputs/outputs/resources are read from the .tf files there.
+              Optional — only for documenting an already-curated module. Leave blank for pre-curation research docs grounded in Google's official documentation.
             </div>
           </div>
 
@@ -1775,9 +1775,15 @@ function DocsPanel({ repos, health }) {
             )}
 
             {/* Sources used */}
-            {(preview.sources_used?.length > 0 || preview.official_doc_urls?.length > 0) && (
+            {(preview.sources_used?.length > 0 || preview.official_doc_urls?.length > 0 || !modulePath.trim()) && (
               <div style={{ background:"#161B22", borderBottom:"1px solid #21262D", padding:"8px 16px",
                 display:"flex", gap:14, flexWrap:"wrap", alignItems:"center", fontSize:10 }}>
+                {!modulePath.trim() && (
+                  <span style={{ fontSize:9.5, fontWeight:700, padding:"2px 8px", borderRadius:10,
+                    color:"#D2A8FF", background:"#D2A8FF18", border:"1px solid #D2A8FF44" }}>
+                    🔬 Research mode — pre-curation
+                  </span>
+                )}
                 {preview.sources_used?.length > 0 && (
                   <span style={{ color:"#8B949E" }}>
                     Sources: {preview.sources_used.map(s => (
@@ -2469,7 +2475,7 @@ function SettingsPanel() {
             <input style={inS} value={llm.base_url}
               onChange={e => setLlm(p => ({...p, base_url: e.target.value}))} />
           </SettingsField>
-          <SettingsField label="Model" hint="Name of the model pulled in Ollama (e.g. gemma4:12b, llama3.1:8b)">
+          <SettingsField label="Model" hint="Name of the model pulled in Ollama (e.g. qwen2.5-coder:7b, llama3.1:8b)">
             <input style={inS} value={llm.model}
               onChange={e => setLlm(p => ({...p, model: e.target.value}))} />
           </SettingsField>
@@ -2987,6 +2993,15 @@ export default function TerraScope() {
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
+  // Keep-alive views: once a view has been opened it stays MOUNTED forever and
+  // is merely hidden with display:none when another view is active. Unmounting
+  // a panel destroys its local state (curation sessions, docgen previews,
+  // in-flight requests, polling), which made long-running work appear to
+  // "stop" whenever the user switched tabs.
+  const visitedViewsRef = useRef(new Set());
+  visitedViewsRef.current.add(mainView);
+  const mounted = (key) => visitedViewsRef.current.has(key);
+
   useEffect(() => {
     apiGet("/repos").then(d => {
       setRepos(d);
@@ -3191,12 +3206,16 @@ export default function TerraScope() {
         )}
 
         {/* ── Main area ── */}
-        {mainView === "general" && (
-          <GeneralChatPanel health={health} />
+        {mounted("general") && (
+          <div style={{ flex:1, overflow:"hidden",
+            display: mainView==="general" ? "flex" : "none" }}>
+            <GeneralChatPanel health={health} />
+          </div>
         )}
 
-        {mainView === "chat" && (
-          <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+        {mounted("chat") && (
+          <div style={{ flex:1, flexDirection:"column", overflow:"hidden",
+            display: mainView==="chat" ? "flex" : "none" }}>
             <div style={{ height:36, borderBottom:"1px solid #21262D", display:"flex",
               alignItems:"center", padding:"0 16px", gap:10, background:"#0D1117", flexShrink:0 }}>
               {selectedRepo ? (
@@ -3287,36 +3306,44 @@ export default function TerraScope() {
           </div>
         )}
 
-        {mainView === "curate" && (
-          <CurationPanel repos={repos} health={health} />
+        {mounted("curate") && (
+          <div style={{ flex:1, overflow:"hidden",
+            display: mainView==="curate" ? "block" : "none" }}>
+            <CurationPanel repos={repos} health={health} />
+          </div>
         )}
 
-        {mainView === "docs" && (
-          <div style={{ flex:1, overflow:"hidden" }}>
+        {mounted("docs") && (
+          <div style={{ flex:1, overflow:"hidden",
+            display: mainView==="docs" ? "block" : "none" }}>
             <DocsPanel repos={repos} health={health} />
           </div>
         )}
 
-        {mainView === "ga" && (
-          <div style={{ flex:1, overflow:"hidden" }}>
+        {mounted("ga") && (
+          <div style={{ flex:1, overflow:"hidden",
+            display: mainView==="ga" ? "block" : "none" }}>
             <GAWorkflowPanel repo={selectedRepo} health={health} />
           </div>
         )}
 
-        {mainView === "scenarios" && (
-          <div style={{ flex:1, overflow:"hidden" }}>
+        {mounted("scenarios") && (
+          <div style={{ flex:1, overflow:"hidden",
+            display: mainView==="scenarios" ? "block" : "none" }}>
             <ScenariosPanel />
           </div>
         )}
 
-        {mainView === "troubleshoot" && (
-          <div style={{ flex:1, overflow:"hidden" }}>
+        {mounted("troubleshoot") && (
+          <div style={{ flex:1, overflow:"hidden",
+            display: mainView==="troubleshoot" ? "block" : "none" }}>
             <TroubleshootPanel repos={repos} selectedRepo={selectedRepo} />
           </div>
         )}
 
-        {mainView === "settings" && (
-          <div style={{ flex:1, display:"flex", overflow:"hidden" }}>
+        {mounted("settings") && (
+          <div style={{ flex:1, overflow:"hidden",
+            display: mainView==="settings" ? "flex" : "none" }}>
             <SettingsPanel />
           </div>
         )}

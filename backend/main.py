@@ -275,7 +275,7 @@ async def generate(request: GenerateRequest):
 
     Note: quality depends on the configured LLM.
     Recommended: qwen2.5-coder:7b or llama3.1:8b for code generation tasks.
-    Minimum:     gemma4:12b (smaller models may miss FILE markers — set a longer max_tokens).
+    Minimum:     qwen2.5-coder:7b (smaller models may miss FILE markers — set a longer max_tokens).
     """
     try:
         return await run_generation(request)
