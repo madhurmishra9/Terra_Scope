@@ -21,7 +21,7 @@ CONFIG_FILE = Path(__file__).parent.parent / "terrascope.config.yaml"
 class LLMConfig(BaseModel):
     provider: str = "ollama"
     base_url: str = "http://localhost:11434"
-    model: str = "gemma3:4b"
+    model: str = "gemma4:12b"
     embedding_model: str = "nomic-embed-text"
     temperature: float = 0.0
     max_tokens: int = 2048

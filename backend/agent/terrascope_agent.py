@@ -28,7 +28,7 @@ from backend.agent.models import (
     AgentResponse, QueryType, QueryRequest,
     SourceReference, IssueSolution,
     GenerateRequest, GenerationResponse, GenerationMode,
-    GeneratedFile, ValidationNote, ValidationLevel,
+    GeneratedFile, ValidationNote,
 )
 from backend.agent.tools.git_tools import (
     list_tags_for_repo, get_latest_tag, get_file_at_tag,
@@ -38,9 +38,7 @@ from backend.agent.tools.hcl_tools import (
     get_all_variables, get_all_resources, get_outputs,
     get_provider_requirements, get_iam_bindings, summarize_module,
 )
-from backend.agent.tools.search_tools import (
-    semantic_search, search_across_tags, is_indexed, get_indexed_tags,
-)
+from backend.agent.tools.search_tools import semantic_search, is_indexed
 from backend.agent.tools.issue_tools import match_known_issue, issues_for_product
 from backend.agent.tools.hcl_generator import (
     build_generation_context,
@@ -244,6 +242,9 @@ _generation_agent: Optional[Agent] = None
 def _make_model() -> OpenAIChatModel:
     cfg = get_config()
     base_url = cfg.llm.base_url.rstrip("/") + "/v1"
+
+    # Build an httpx client with trust_env=False so corporate proxy env vars
+    # (HTTP_PROXY / HTTPS_PROXY) don't intercept local Ollama connections.
     try:
         import httpx
         from openai import AsyncOpenAI
@@ -252,11 +253,12 @@ def _make_model() -> OpenAIChatModel:
             api_key="ollama",
             http_client=httpx.AsyncClient(
                 trust_env=False,
-                timeout=httpx.Timeout(120.0),
+                timeout=httpx.Timeout(120.0),   # generous timeout for local LLM
             ),
         )
         return OpenAIChatModel(model_name=cfg.llm.model, openai_client=openai_client)
     except TypeError:
+        # Older pydantic_ai doesn't accept openai_client — fall back to provider
         provider = OpenAIProvider(base_url=base_url, api_key="ollama")
         return OpenAIChatModel(model_name=cfg.llm.model, provider=provider)
 
@@ -287,17 +289,12 @@ def get_generation_agent() -> Agent:
     return _generation_agent
 
 
-# Cap on how many indexed versions a "scan all" query touches — bounds latency
-# (each tag costs one extra vector-store query) while still covering the
-# versions a user is realistically asking about.
-_MAX_TAGS_PER_SCAN = 6
-
+# ── Query pipeline ─────────────────────────────────────────────────────────────
 
 async def run_query(request: QueryRequest) -> AgentResponse:
     """
     Main query entry point.
-    1. Resolve repo and tag(s) — either one pinned tag, or (when
-       request.scan_all_tags is set) every indexed version of the module
+    1. Resolve repo and tag
     2. Build rich context from code tools
     3. Run query agent
     4. Post-process: enforce confidence threshold, inject sources/solutions
@@ -328,69 +325,40 @@ async def run_query(request: QueryRequest) -> AgentResponse:
             grounded=False,
         )
 
-    # Resolve tag(s) to analyze
-    if request.scan_all_tags:
-        indexed = get_indexed_tags(repo_name)
-        if not indexed:
-            return AgentResponse(
-                query_type=QueryType.UNKNOWN,
-                answer=(
-                    f"Repository '{repo_name}' has no indexed versions yet. "
-                    "Please click 'Re-index' in the UI or run: python -m backend.indexer.repo_indexer"
-                ),
-                confidence=0.0,
-                grounded=False,
-                repo_name=repo_name,
-                disclaimer="Run indexing before scanning across versions.",
-            )
-        # Newest-first order from Git, filtered down to what's actually indexed.
-        ordered = [t for t in list_tags_for_repo(repo_name) if t in indexed] or indexed
-        tags = ordered[:_MAX_TAGS_PER_SCAN]
-        tag_label = f"ALL INDEXED VERSIONS ({', '.join(tags)})"
-    else:
-        tag = request.tag or get_latest_tag(repo_name)
-        if not tag:
-            tag = "main"
-        if not is_indexed(repo_name, tag):
-            return AgentResponse(
-                query_type=QueryType.UNKNOWN,
-                answer=(
-                    f"Repository '{repo_name}' at tag '{tag}' has not been indexed yet. "
-                    "Please click 'Re-index' in the UI or run: python -m backend.indexer.repo_indexer"
-                ),
-                confidence=0.0,
-                grounded=False,
-                tags_analyzed=[tag],
-                repo_name=repo_name,
-                disclaimer="Run indexing before querying.",
-            )
-        tags = [tag]
-        tag_label = tag
+    # Resolve tag
+    tag = request.tag or get_latest_tag(repo_name)
+    if not tag:
+        tag = "main"
 
-    multi_tag = len(tags) > 1
+    # Check index
+    if not is_indexed(repo_name, tag):
+        return AgentResponse(
+            query_type=QueryType.UNKNOWN,
+            answer=(
+                f"Repository '{repo_name}' at tag '{tag}' has not been indexed yet. "
+                "Please click 'Re-index' in the UI or run: python -m backend.indexer.repo_indexer"
+            ),
+            confidence=0.0,
+            grounded=False,
+            tags_analyzed=[tag],
+            repo_name=repo_name,
+            disclaimer="Run indexing before querying.",
+        )
 
-    # Build tool context
+    # Build tool context — each step is best-effort; errors degrade gracefully
     try:
-        summary = summarize_module(repo_name, tags[0])
+        summary = summarize_module(repo_name, tag)
     except Exception as e:
         print(f"[query] summarize_module failed (non-fatal): {e}")
         summary = {}
 
     try:
-        if multi_tag:
-            n_per_tag = max(2, cfg.grounding.max_retrieval_chunks // len(tags))
-            top_sources = search_across_tags(
-                request.question, repo_name, tags,
-                n_per_tag=n_per_tag,
-                max_total=cfg.grounding.max_retrieval_chunks * 2,
-            )
-        else:
-            top_sources = semantic_search(
-                request.question, repo_name, tags[0],
-                n_results=cfg.grounding.max_retrieval_chunks,
-            )
+        top_sources = semantic_search(
+            request.question, repo_name, tag,
+            n_results=cfg.grounding.max_retrieval_chunks,
+        )
     except Exception as e:
-        print(f"[query] search failed (non-fatal): {e}")
+        print(f"[query] semantic_search failed (non-fatal): {e}")
         top_sources = []
 
     try:
@@ -400,11 +368,10 @@ async def run_query(request: QueryRequest) -> AgentResponse:
 
     context_block = _build_query_context(
         repo_cfg=repo_cfg,
-        tag=tag_label,
+        tag=tag,
         summary=summary,
         top_sources=top_sources,
         issue_match=issue_match,
-        multi_tag=multi_tag,
     )
     full_prompt = f"{context_block}\n\nQUESTION: {request.question}"
 
@@ -423,7 +390,7 @@ async def run_query(request: QueryRequest) -> AgentResponse:
 
     # Post-process
     response.repo_name     = repo_name
-    response.tags_analyzed = tags
+    response.tags_analyzed = [tag]
 
     if not response.sources and top_sources:
         response.sources = top_sources[:3]
@@ -431,51 +398,16 @@ async def run_query(request: QueryRequest) -> AgentResponse:
     if issue_match and not response.issue_solution:
         response.issue_solution = issue_match
 
-    # Deterministic confidence backstop — never let the LLM's self-reported
-    # confidence exceed what the retrieved evidence actually supports. A fluent
-    # answer resting on thin or low-relevance sources should not be reported as
-    # high-confidence; this is the anti-hallucination check on the score itself.
-    evidence_confidence = _evidence_confidence(response.sources, has_issue_match=bool(response.issue_solution))
-    response.confidence = round(min(response.confidence, evidence_confidence), 3)
-
     threshold = cfg.grounding.min_confidence_threshold
     if response.confidence < threshold:
         response.disclaimer = (
             f"Low confidence ({response.confidence:.0%}). "
             f"The indexed code does not contain enough information to answer this reliably. "
-            f"Check that the correct version(s) ('{tag_label}') are indexed and your question refers to this module."
+            f"Check that the correct tag ('{tag}') is indexed and your question refers to this module."
         )
 
     response.grounded = len(response.sources) > 0
     return response
-
-
-def _evidence_confidence(sources: list[SourceReference], has_issue_match: bool = False) -> float:
-    """
-    Deterministic confidence estimate derived purely from retrieval evidence —
-    independent of, and a ceiling on, the LLM's self-reported `confidence`.
-
-    Weighs:
-    - how many relevant code chunks were found (more corroborating files = higher),
-    - how relevant those chunks are (mean relevance score from the vector search),
-    - whether a curated known-issue match backs the answer (a vetted KB signal).
-
-    Returns 0.0 when there is no supporting evidence at all, so an ungrounded
-    answer can never be reported as confident regardless of how fluent it reads.
-    """
-    base = 0.0
-    if sources:
-        avg_relevance = sum(s.relevance for s in sources) / len(sources)
-        # 1 source corroborates but doesn't confirm; 2+ sources can approach full marks.
-        count_factor  = min(1.0, 0.55 + 0.20 * (len(sources) - 1))
-        base = avg_relevance * count_factor
-
-    if has_issue_match:
-        # A curated KB match is a strong, pre-vetted signal even without
-        # matching code chunks — but code evidence can still push it higher.
-        base = max(base, 0.7)
-
-    return round(min(1.0, base), 3)
 
 
 def _build_query_context(
@@ -484,13 +416,12 @@ def _build_query_context(
     summary: dict,
     top_sources: list[SourceReference],
     issue_match: Optional[IssueSolution],
-    multi_tag: bool = False,
 ) -> str:
     parts = [
         "=== REPOSITORY CONTEXT ===",
         f"Repo: {repo_cfg.name} ({repo_cfg.display_name})",
         f"GCP Product: {repo_cfg.gcp_product}",
-        f"Tag(s) being analyzed: {tag}",
+        f"Tag being analyzed: {tag}",
         "",
         "=== MODULE SUMMARY (from code analysis) ===",
         json.dumps(summary, indent=2),
@@ -499,18 +430,9 @@ def _build_query_context(
 
     if top_sources:
         parts.append("=== MOST RELEVANT CODE CHUNKS (from semantic search) ===")
-        if multi_tag:
-            parts.append(
-                "NOTE: these chunks were gathered across MULTIPLE versions/tags of this "
-                "module (merged and re-ranked by relevance). For EVERY claim in your "
-                "answer, name the TAG, the FILE, and the LINE NUMBER it came from, and "
-                "explain WHY that finding is relevant to the question — including "
-                "whether it differs across versions."
-            )
         for i, src in enumerate(top_sources, 1):
-            tag_prefix = f"[tag: {src.tag}] " if multi_tag else ""
             parts.append(
-                f"[Source {i}] {tag_prefix}{src.file_path} lines {src.line_start}-{src.line_end} "
+                f"[Source {i}] {src.file_path} lines {src.line_start}-{src.line_end} "
                 f"(relevance: {src.relevance:.2f}):\n{src.snippet}"
             )
         parts.append("")
@@ -559,7 +481,7 @@ async def run_generation(request: GenerateRequest) -> GenerationResponse:
             target_module=request.target_module,
             files=[],
             validation_notes=[ValidationNote(
-                level=ValidationLevel.ERROR,
+                level="error",
                 file="",
                 message=f"LLM generation failed: {e}. Check that Ollama is running with a capable model.",
             )],
@@ -579,7 +501,7 @@ async def run_generation(request: GenerateRequest) -> GenerationResponse:
             target_module=request.target_module,
             files=[],
             validation_notes=[ValidationNote(
-                level=ValidationLevel.ERROR,
+                level="error",
                 file="",
                 message=(
                     "No files could be parsed from LLM output. "

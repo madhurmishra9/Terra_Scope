@@ -59,21 +59,28 @@ class DocgenRequest(BaseModel):
     assets_dir:    Optional[str] = None       # Folder with per-product diagram images
     dry_run:       bool = False
     dry_run_dir:   str = "output/docgen_dry_run"
+    fetch_docs:    bool = True                 # Fetch & synthesise Google official docs
+    provider:      str = "google"
 
 
 class PageResult(BaseModel):
     doc_type:     str
     page_id:      Optional[str] = None
+    page_url:     Optional[str] = None
     dry_run_path: Optional[str] = None
+    dry_run_html: Optional[str] = None
     status:       str = "ok"        # "ok" | "error"
     error:        Optional[str] = None
 
 
 class DocgenResult(BaseModel):
-    product_name: str
-    space_key:    str = ""
-    pages:        list[PageResult] = []
-    dry_run:      bool = False
+    product_name:      str
+    space_key:         str = ""
+    pages:             list[PageResult] = []
+    dry_run:           bool = False
+    parent_page_url:   Optional[str] = None
+    official_doc_urls: list[str] = []
+    sources_used:      list[str] = []
 
     @property
     def success(self) -> bool:
@@ -86,6 +93,17 @@ async def run(req: DocgenRequest) -> DocgenResult:
     """Execute the full docgen pipeline for one product."""
     # 1. Metadata
     meta = _extract_metadata(req)
+
+    # 1b. Enrich with Google official documentation (best-effort)
+    sources_used: list[str] = []
+    if req.fetch_docs:
+        try:
+            from backend.module_curator.docgen.gcp_docs_fetcher import fetch_gcp_docs
+            bundle = await fetch_gcp_docs(req.product_name, provider=req.provider)
+            meta.merge_docs_bundle(bundle)
+            sources_used = bundle.sources_used
+        except Exception:
+            pass
 
     # 2. Field map
     fm_path = Path(req.field_map)
@@ -111,15 +129,25 @@ async def run(req: DocgenRequest) -> DocgenResult:
 
     # 5. Ensure parent page exists
     parent_page_id: Optional[str] = None
+    parent_page_url: Optional[str] = None
     if not req.dry_run and client and settings:
-        parent_page_id = _ensure_parent_page(client, space_key, req.product_name, entry, settings)
+        parent_page_id, parent_page_url = _ensure_parent_page(
+            client, space_key, req.product_name, entry, settings
+        )
         manifest.set(req.product_name, parent_page_id=parent_page_id, space_key=space_key)
 
     # 6. Generate each doc type
     ref_path   = Path(req.ref_template)
     assets_dir = Path(req.assets_dir) if req.assets_dir else None
     module_dir = Path(req.module_path) if req.module_path else None
-    result     = DocgenResult(product_name=req.product_name, space_key=space_key, dry_run=req.dry_run)
+    result     = DocgenResult(
+        product_name=req.product_name,
+        space_key=space_key,
+        dry_run=req.dry_run,
+        parent_page_url=parent_page_url,
+        official_doc_urls=meta.official_doc_urls,
+        sources_used=sources_used,
+    )
 
     for doc_type in req.doc_types:
         page_result = _generate_doc(
@@ -202,11 +230,13 @@ def _generate_doc(
             dry_dir.mkdir(parents=True, exist_ok=True)
             slug     = doc_type.lower().replace(" ", "_")
             out_path = dry_dir / f"{meta.service_name}_{slug}.html"
-            out_path.write_text(
-                f"<!-- {page_title} -->\n{page_html}\n",
-                encoding="utf-8",
+            full_html = f"<!-- {page_title} -->\n{page_html}\n"
+            out_path.write_text(full_html, encoding="utf-8")
+            return PageResult(
+                doc_type=doc_type,
+                dry_run_path=str(out_path),
+                dry_run_html=page_html,
             )
-            return PageResult(doc_type=doc_type, dry_run_path=str(out_path))
 
         # ── Publish ───────────────────────────────────────────────────────────
         assert client is not None
@@ -214,10 +244,9 @@ def _generate_doc(
 
         if existing_id:
             version = client.get_page_version(existing_id)
-            client.update_page(existing_id, page_title, page_html, version)
-            page_id = existing_id
+            page_id, page_url = client.update_page_full(existing_id, page_title, page_html, version)
         else:
-            page_id = client.create_page(
+            page_id, page_url = client.create_page_full(
                 space_key, page_title, page_html, parent_id=parent_page_id
             )
 
@@ -236,7 +265,7 @@ def _generate_doc(
             pass
 
         manifest.set(req.product_name, pages={doc_type: page_id})
-        return PageResult(doc_type=doc_type, page_id=page_id)
+        return PageResult(doc_type=doc_type, page_id=page_id, page_url=page_url)
 
     except Exception as exc:
         return PageResult(doc_type=doc_type, status="error", error=str(exc))
@@ -250,10 +279,12 @@ def _ensure_parent_page(
     product_name: str,
     entry,
     settings,
-) -> str:
-    """Get or create the per-product parent page and return its ID."""
+) -> tuple[str, str]:
+    """Get or create the per-product parent page; return (id, url)."""
     if entry and entry.parent_page_id:
-        return entry.parent_page_id
+        # We still want a URL; build it from base
+        url = f"{settings.confluence_base_url}/pages/viewpage.action?pageId={entry.parent_page_id}"
+        return entry.parent_page_id, url
 
     parent_title = f"{product_name.title()} — TerraScope Documentation"
 
@@ -263,13 +294,15 @@ def _ensure_parent_page(
 
     existing = client.get_page_by_title(space_key, parent_title)
     if existing:
-        return str(existing["id"])
+        pid = str(existing["id"])
+        url = f"{settings.confluence_base_url}/pages/viewpage.action?pageId={pid}"
+        return pid, url
 
     body = (
         f"<p>TerraScope-generated documentation for the "
         f"<strong>{product_name}</strong> Terraform module.</p>"
     )
-    return client.create_page(space_key, parent_title, body, parent_id=root_id)
+    return client.create_page_full(space_key, parent_title, body, parent_id=root_id)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -283,17 +316,54 @@ def _extract_metadata(req: DocgenRequest) -> TFModuleMetadata:
 
 
 def _minimal_ir(meta: TFModuleMetadata, doc_type: str) -> DocumentIR:
-    """Minimal IR when no reference .docx template is found."""
+    """
+    Rich default IR built programmatically when no reference .docx is present.
+
+    Lays out a full product document using every available field_map token, so
+    a brand-new (un-curated) product still gets a complete, structured page:
+    overview, features, required APIs, IAM roles, resources, inputs, outputs,
+    security considerations, and links to the official Google docs.
+    """
     from backend.module_curator.docgen.ir import FieldNode, HeadingNode, ParagraphNode
     title = f"{meta.service_name.title()} — {doc_type}"
+    nodes = [
+        HeadingNode(level=1, text=title),
+
+        HeadingNode(level=2, text="Overview"),
+        FieldNode(token="product_overview"),
+
+        HeadingNode(level=2, text="Key Features"),
+        FieldNode(token="key_features_list"),
+
+        HeadingNode(level=2, text="Required Google Cloud APIs"),
+        FieldNode(token="apis_required_list"),
+
+        HeadingNode(level=2, text="Common IAM Roles"),
+        FieldNode(token="common_roles_list"),
+
+        HeadingNode(level=2, text="Terraform Resources Managed"),
+        FieldNode(token="resource_types_list"),
+
+        HeadingNode(level=2, text="Required Inputs"),
+        FieldNode(token="required_inputs_table"),
+
+        HeadingNode(level=2, text="Optional Inputs"),
+        FieldNode(token="optional_inputs_table"),
+
+        HeadingNode(level=2, text="Outputs"),
+        FieldNode(token="outputs_table"),
+
+        HeadingNode(level=2, text="Version Constraints"),
+        ParagraphNode(text="Terraform: {{terraform_version}} · Provider: {{provider_version}}"),
+
+        HeadingNode(level=2, text="Security Considerations"),
+        FieldNode(token="security_considerations_list"),
+
+        HeadingNode(level=2, text="Official Documentation"),
+        FieldNode(token="official_docs_links"),
+    ]
     return DocumentIR(
-        nodes=[
-            HeadingNode(level=1, text=title),
-            ParagraphNode(text=meta.description or ""),
-            FieldNode(token="resource_types_list"),
-            FieldNode(token="required_inputs_table"),
-            FieldNode(token="outputs_table"),
-        ],
+        nodes=nodes,
         doc_type=doc_type,
         product_name=meta.service_name,
         title=title,

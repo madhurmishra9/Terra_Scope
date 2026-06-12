@@ -45,6 +45,25 @@ class TFModuleMetadata(BaseModel):
     terraform_version: str = ""
     readme:            str = ""
 
+    # ── Enrichment from Google official docs (populated by gcp_docs_fetcher) ──
+    overview:                str = ""
+    key_features:            list[str] = []
+    security_considerations: list[str] = []
+    apis_required:           list[str] = []
+    common_roles:            list[str] = []
+    official_doc_urls:       list[str] = []
+
+    def merge_docs_bundle(self, bundle) -> None:
+        """Fold a GCPDocsBundle's synthesised fields into this metadata."""
+        self.overview                = bundle.overview or self.overview
+        self.key_features            = bundle.key_features or self.key_features
+        self.security_considerations = bundle.security_considerations or self.security_considerations
+        self.apis_required           = bundle.apis_required or self.apis_required
+        self.common_roles            = bundle.common_roles or self.common_roles
+        self.official_doc_urls       = bundle.official_doc_urls or self.official_doc_urls
+        if bundle.overview and not self.description:
+            self.description = bundle.overview
+
 
 # ── Public API ────────────────────────────────────────────────────────────────
 

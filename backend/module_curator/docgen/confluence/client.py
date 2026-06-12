@@ -70,6 +70,25 @@ class ConfluenceClient:
         resp = self._post(f"{self._api}/content", payload)
         return str(resp["id"])
 
+    def create_page_full(
+        self,
+        space_key: str,
+        title: str,
+        body_html: str,
+        parent_id: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Create a page and return (page_id, web_url)."""
+        payload: dict[str, Any] = {
+            "type": "page",
+            "title": title,
+            "space": {"key": space_key},
+            "body": {"storage": {"value": body_html, "representation": "storage"}},
+        }
+        if parent_id:
+            payload["ancestors"] = [{"id": parent_id}]
+        resp = self._post(f"{self._api}/content", payload)
+        return str(resp["id"]), self._page_url(resp)
+
     def update_page(
         self,
         page_id: str,
@@ -86,6 +105,37 @@ class ConfluenceClient:
         }
         resp = self._put(f"{self._api}/content/{page_id}", payload)
         return str(resp["id"])
+
+    def update_page_full(
+        self,
+        page_id: str,
+        title: str,
+        body_html: str,
+        current_version: int,
+    ) -> tuple[str, str]:
+        """Update a page and return (page_id, web_url)."""
+        payload: dict[str, Any] = {
+            "type": "page",
+            "title": title,
+            "version": {"number": current_version + 1},
+            "body": {"storage": {"value": body_html, "representation": "storage"}},
+        }
+        resp = self._put(f"{self._api}/content/{page_id}", payload)
+        return str(resp["id"]), self._page_url(resp)
+
+    def _page_url(self, resp: dict) -> str:
+        """Build an absolute web URL from a content API response."""
+        links = resp.get("_links", {}) or {}
+        base = links.get("base", "")
+        webui = links.get("webui", "")
+        if base and webui:
+            return f"{base}{webui}"
+        # Fallback: construct from configured base_url + page id
+        page_id = resp.get("id", "")
+        root = self._s.confluence_base_url
+        if page_id and root:
+            return f"{root}/pages/viewpage.action?pageId={page_id}"
+        return ""
 
     def get_page_version(self, page_id: str) -> int:
         resp = self._get(f"{self._api}/content/{page_id}", params={"expand": "version"})

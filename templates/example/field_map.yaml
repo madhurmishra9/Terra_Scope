@@ -77,19 +77,33 @@ fields:
     source: metadata.readme
     fallback: "No README found."
 
-  # ── LLM-generated prose (source: llm.<hint>) ─────────────────────────────────
-  # Calls the local LLM at temperature 0.2, grounded in module metadata.
-  # Falls back to [LLM prose unavailable: ...] on any error.
+  # ── Google official-docs enrichment (populated by gcp_docs_fetcher) ───────
 
-  overview:
-    source: llm.overview
+  product_overview:
+    source: metadata.overview
+    fallback: "Refer to the official Google Cloud documentation for an overview."
 
-  security_considerations:
-    source: llm.security considerations
+  key_features_list:
+    source: metadata.key_features
+    format: bullet_list
+    fallback: "See official documentation."
 
-  architecture_summary:
-    source: llm.architecture summary
+  security_considerations_list:
+    source: metadata.security_considerations
+    format: bullet_list
+    fallback: "Follow Google Cloud security best practices and least-privilege IAM."
 
-  doc_type:
-    source: context.doc_type
-    fallback: Documentation
+  apis_required_list:
+    source: metadata.apis_required
+    format: bullet_list
+    fallback: "None documented."
+
+  common_roles_list:
+    source: metadata.common_roles
+    format: bullet_list
+    fallback: "None documented."
+
+  official_docs_links:
+    source: metadata.official_doc_urls
+    format: bullet_list
+    fallback: "https://cloud.google.com/docs"

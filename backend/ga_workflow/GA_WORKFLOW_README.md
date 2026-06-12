@@ -1406,7 +1406,7 @@ terrascope:
   llm:
     provider: ollama
     base_url: http://localhost:11434
-    model: gemma3:4b
+    model: gemma4:12b
     embedding_model: nomic-embed-text
     temperature: 0.0
     max_tokens: 2048

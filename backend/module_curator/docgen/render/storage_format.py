@@ -125,6 +125,28 @@ def _diagram(node: DiagramNode, att: dict[str, str]) -> str:
 
 def _field(node: FieldNode) -> str:
     value = node.value if node.value is not None else f"[TODO: {node.token}]"
-    # Multi-line values (bullet lists, markdown tables) — preserve newlines
+
+    # Detect a markdown-style table (pipe-delimited, with a --- separator row)
+    # and render it as a real Confluence <table> instead of a flat paragraph.
+    lines = [ln for ln in value.split("\n") if ln.strip()]
+    if len(lines) >= 2 and "|" in lines[0] and set(lines[1].replace("|", "").strip()) <= {"-", " "}:
+        return _markdown_table_to_html(lines)
+
+    # Multi-line values (bullet lists) — preserve newlines as <br/>
     escaped = html.escape(value).replace("\n", "<br/>")
     return f"<p>{escaped}</p>"
+
+
+def _markdown_table_to_html(lines: list[str]) -> str:
+    def cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    headers = cells(lines[0])
+    body_rows = [cells(ln) for ln in lines[2:]]   # skip header + separator
+    rows: list[str] = []
+    header_cells = "".join(f"<th><p>{html.escape(h)}</p></th>" for h in headers)
+    rows.append(f"<tr>{header_cells}</tr>")
+    for r in body_rows:
+        data_cells = "".join(f"<td><p>{html.escape(c)}</p></td>" for c in r)
+        rows.append(f"<tr>{data_cells}</tr>")
+    return "<table><tbody>\n" + "\n".join(rows) + "\n</tbody></table>"

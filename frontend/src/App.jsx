@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ── API client ────────────────────────────────────────────────────────────────
-const API    = "http://localhost:8000/api";
-const GA_API = "http://localhost:8000/api/ga";
+const API    = "/api";          // relative — Vite proxy routes to backend
+const GA_API = "/api/ga";       // relative — single source of truth in vite.config.js
 
 async function apiGet(path, base = API) {
   const r = await fetch(`${base}${path}`);
@@ -1071,167 +1071,6 @@ function GAWorkflowPanel({ repo, health }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  DOCGEN PANEL
-// ══════════════════════════════════════════════════════════════════════════════
-
-function DocgenPanel({ sessionId, productName }) {
-  const [open,     setOpen]     = useState(false);
-  const [dryRun,   setDryRun]   = useState(false);
-  const [loading,  setLoading]  = useState(false);
-  const [result,   setResult]   = useState(null);
-  const [cfgOk,    setCfgOk]    = useState(null);   // null = unchecked
-  const [cfgMsg,   setCfgMsg]   = useState("");
-
-  // Check Confluence config when panel is first opened
-  useEffect(() => {
-    if (!open || cfgOk !== null) return;
-    apiGet("/docgen/config").then(d => {
-      setCfgOk(d.configured);
-      setCfgMsg(d.message);
-    }).catch(() => {
-      setCfgOk(false);
-      setCfgMsg("Could not reach backend.");
-    });
-  }, [open]);
-
-  const handleGenerate = async () => {
-    setLoading(true); setResult(null);
-    try {
-      const res = await apiPost(`/curate/${sessionId}/docgen`, {
-        product_name: productName,
-        dry_run: dryRun,
-      });
-      setResult(res);
-    } catch (e) {
-      setResult({ error: e.message });
-    }
-    setLoading(false);
-  };
-
-  const DOC_TYPE_COLORS = {
-    "HLD": "#58A6FF",
-    "CPSD": "#D2A8FF",
-    "Architectural Design": "#FFA657",
-    "Highly Confidential Assessment": "#F85149",
-  };
-
-  return (
-    <div style={{ borderTop:"1px solid #21262D", background:"#0D1117", flexShrink:0 }}>
-      {/* Header toggle */}
-      <div
-        onClick={() => setOpen(o => !o)}
-        style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 16px", cursor:"pointer" }}
-      >
-        <span style={{ fontSize:13 }}>📄</span>
-        <span style={{ fontSize:11.5, fontWeight:600, color:"#E6EDF3" }}>Confluence Documentation</span>
-        {cfgOk === false && open && (
-          <span style={{ fontSize:10, color:"#F85149", background:"#F8514911",
-            border:"1px solid #F8514933", borderRadius:3, padding:"1px 6px" }}>
-            not configured
-          </span>
-        )}
-        {cfgOk === true && open && (
-          <span style={{ fontSize:10, color:"#3FB950", background:"#3FB95011",
-            border:"1px solid #3FB95033", borderRadius:3, padding:"1px 6px" }}>
-            ✓ configured
-          </span>
-        )}
-        <span style={{ marginLeft:"auto", color:"#484F58", fontSize:12 }}>{open ? "▲" : "▼"}</span>
-      </div>
-
-      {open && (
-        <div style={{ padding:"10px 16px 14px", borderTop:"1px solid #21262D" }}>
-          {/* Config message */}
-          {cfgOk === false && (
-            <div style={{ fontSize:11, color:"#FFA657", background:"#FFA65711",
-              border:"1px solid #FFA65733", borderRadius:5, padding:"7px 10px", marginBottom:10,
-              lineHeight:1.5 }}>
-              ⚠ {cfgMsg}<br />
-              <span style={{ color:"#484F58" }}>
-                Set CONFLUENCE_BASE_URL and CONFLUENCE_API_TOKEN in .env to publish.
-                Dry-run still works.
-              </span>
-            </div>
-          )}
-
-          {cfgOk === null && (
-            <div style={{ fontSize:11, color:"#484F58", marginBottom:10 }}>Checking Confluence…</div>
-          )}
-
-          {/* Controls */}
-          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10, flexWrap:"wrap" }}>
-            <label style={{ display:"flex", alignItems:"center", gap:5, fontSize:11, color:"#8B949E", cursor:"pointer" }}>
-              <input
-                type="checkbox"
-                checked={dryRun}
-                onChange={e => setDryRun(e.target.checked)}
-                style={{ accentColor:"#58A6FF" }}
-              />
-              Dry run (write HTML locally, no Confluence calls)
-            </label>
-            <button
-              onClick={handleGenerate}
-              disabled={loading || (!cfgOk && !dryRun)}
-              style={{
-                marginLeft:"auto",
-                background: (loading || (!cfgOk && !dryRun)) ? "#21262D" : "#1F6FEB22",
-                border:`1px solid ${(loading || (!cfgOk && !dryRun)) ? "#21262D" : "#1F6FEB66"}`,
-                borderRadius:6,
-                color: (loading || (!cfgOk && !dryRun)) ? "#484F58" : "#58A6FF",
-                fontSize:11.5, fontWeight:600,
-                padding:"6px 16px", cursor: (loading || (!cfgOk && !dryRun)) ? "not-allowed" : "pointer",
-                fontFamily:"inherit",
-              }}
-            >
-              {loading ? "Generating…" : dryRun ? "Dry Run" : "Publish to Confluence"}
-            </button>
-          </div>
-
-          {/* Results */}
-          {result && !result.error && (
-            <div>
-              <div style={{ fontSize:10, color:"#484F58", textTransform:"uppercase",
-                letterSpacing:"0.06em", marginBottom:6 }}>
-                Results {result.dry_run ? "(dry run)" : `· space: ${result.space_key}`}
-              </div>
-              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-                {(result.pages || []).map((p, i) => {
-                  const color = DOC_TYPE_COLORS[p.doc_type] || "#8B949E";
-                  return (
-                    <div key={i} style={{ display:"flex", alignItems:"center", gap:8,
-                      background:"#161B22", border:`1px solid ${color}22`,
-                      borderLeft:`3px solid ${p.status==="ok" ? color : "#F85149"}`,
-                      borderRadius:5, padding:"5px 10px" }}>
-                      <span style={{ fontSize:10, color, fontWeight:700, minWidth:60 }}>{p.doc_type}</span>
-                      {p.status === "ok" ? (
-                        <span style={{ fontSize:10, color:"#3FB950" }}>
-                          ✓ {p.dry_run_path
-                            ? <span style={{ fontFamily:"monospace", color:"#484F58" }}>{p.dry_run_path}</span>
-                            : `page ${p.page_id}`}
-                        </span>
-                      ) : (
-                        <span style={{ fontSize:10, color:"#F85149" }}>✗ {p.error}</span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {result?.error && (
-            <div style={{ fontSize:11, color:"#F85149", background:"#F8514911",
-              border:"1px solid #F8514933", borderRadius:5, padding:"7px 10px" }}>
-              Error: {result.error}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 //  CURATION PANEL
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1301,26 +1140,6 @@ function HighlightedCode({ content, filename = "" }) {
         {content.split("\n").map((line, i) => {
           const isComment = line.trim().startsWith("#");
           return <span key={i} style={{ display:"block", color: isComment ? "#484F58" : "#C9D1D9" }}>{line}</span>;
-        })}
-      </pre>
-    );
-  }
-  // Unified-diff detection mirrors the heuristic hcl_generator uses to set is_diff
-  // (`content.startswith("---") or content.startswith("@@")`), so coloring kicks in
-  // regardless of which pipeline produced the content.
-  if (/^(---|\+\+\+|@@ )/.test(content.trimStart())) {
-    return (
-      <pre style={{ margin:0, padding:"12px 16px", fontSize:11.5, lineHeight:1.7,
-        fontFamily:"monospace", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
-        {content.split("\n").map((line, i) => {
-          const isHunk    = line.startsWith("@@");
-          const isFileHdr = line.startsWith("---") || line.startsWith("+++");
-          const isAdded   = !isFileHdr && line.startsWith("+");
-          const isRemoved = !isFileHdr && line.startsWith("-");
-          const color = isHunk ? "#58A6FF" : isFileHdr ? "#8B949E"
-            : isAdded ? "#3FB950" : isRemoved ? "#F85149" : "#C9D1D9";
-          const bg = isHunk ? "#58A6FF10" : isAdded ? "#3FB95014" : isRemoved ? "#F8514914" : "transparent";
-          return <span key={i} style={{ display:"block", background:bg, color }}>{line}</span>;
         })}
       </pre>
     );
@@ -1651,7 +1470,7 @@ function CurationChat({ session, onAnswer, onGenerate, generating }) {
               </div>
             ))}
             <div style={{ fontSize:10, color:"#484F58", marginTop:10 }}>
-              3 LLM passes — typically 45–120 seconds with gemma3:4b
+              3 LLM passes — typically 45–120 seconds with gemma4:12b
             </div>
           </div>
         )}
@@ -1718,6 +1537,298 @@ function CurationChat({ session, onAnswer, onGenerate, generating }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  DOCS PANEL  — generate Google-doc-enriched Confluence pages (curated or not)
+// ══════════════════════════════════════════════════════════════════════════════
+
+const DOC_TYPE_LABELS = {
+  "HLD": "High-Level Design",
+  "CPSD": "Cloud Product Security Design",
+  "Architectural Design": "Architectural Design",
+  "Highly Confidential Assessment": "Highly Confidential Assessment",
+};
+
+function DocsPanel({ repos, health }) {
+  const [productName, setProductName] = useState("");
+  const [provider, setProvider] = useState("google");
+  const [modulePath, setModulePath] = useState("");
+  const [fetchDocs, setFetchDocs] = useState(true);
+  const [docTypes, setDocTypes] = useState(["HLD"]);
+
+  const [preview, setPreview] = useState(null);     // DocgenResult (dry-run)
+  const [published, setPublished] = useState(null); // DocgenResult (publish)
+  const [activeDoc, setActiveDoc] = useState(0);
+  const [confluenceCfg, setConfluenceCfg] = useState(null);
+
+  const [previewing, setPreviewing] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [error, setError] = useState(null);
+
+  const ollamaOk = health?.ollama === "running";
+
+  useEffect(() => {
+    apiGet("/docgen/config").then(setConfluenceCfg).catch(() => {});
+  }, []);
+
+  const toggleDocType = (dt) => {
+    setDocTypes(prev => prev.includes(dt) ? prev.filter(x => x !== dt) : [...prev, dt]);
+  };
+
+  const buildBody = () => ({
+    product_name: productName.trim(),
+    provider,
+    module_path: modulePath.trim() || null,
+    fetch_docs: fetchDocs,
+    doc_types: docTypes,
+  });
+
+  const handlePreview = async () => {
+    if (!productName.trim()) { setError("Enter a product name"); return; }
+    if (docTypes.length === 0) { setError("Select at least one document type"); return; }
+    setPreviewing(true); setError(null); setPublished(null);
+    try {
+      const result = await apiPost("/docgen/preview", buildBody());
+      setPreview(result);
+      setActiveDoc(0);
+    } catch (e) { setError(e.message); }
+    finally { setPreviewing(false); }
+  };
+
+  const handlePublish = async () => {
+    if (!preview) return;
+    setPublishing(true); setError(null);
+    try {
+      const result = await apiPost("/docgen/publish", buildBody());
+      setPublished(result);
+    } catch (e) { setError(e.message); }
+    finally { setPublishing(false); }
+  };
+
+  const inputStyle = {
+    background:"#161B22", border:"1px solid #21262D", borderRadius:5,
+    color:"#E6EDF3", fontSize:11.5, padding:"6px 10px", fontFamily:"inherit", width:"100%",
+  };
+  const labelStyle = { fontSize:10, color:"#484F58", textTransform:"uppercase",
+    letterSpacing:"0.06em", marginBottom:4, display:"block" };
+  const sectionStyle = { marginBottom:14 };
+
+  const pages = preview?.pages || [];
+  const confluenceReady = confluenceCfg?.configured;
+
+  return (
+    <div style={{ display:"flex", height:"100%", overflow:"hidden" }}>
+
+      {/* ── Left config panel ── */}
+      <div style={{ width:300, borderRight:"1px solid #21262D", display:"flex",
+        flexDirection:"column", background:"#161B22", flexShrink:0, overflowY:"auto" }}>
+        <div style={{ padding:"12px 14px", borderBottom:"1px solid #21262D" }}>
+          <div style={{ fontSize:12.5, fontWeight:700, color:"#E6EDF3", marginBottom:2 }}>📄 Documentation Generator</div>
+          <div style={{ fontSize:10.5, color:"#484F58" }}>Google-doc-enriched Confluence pages — no curation required</div>
+        </div>
+
+        <div style={{ padding:"14px", flex:1 }}>
+          {/* Product name */}
+          <div style={sectionStyle}>
+            <label style={labelStyle}>Product / Service Name</label>
+            <input value={productName} onChange={e => setProductName(e.target.value)}
+              placeholder="e.g. BigQuery, Cloud Run, Memorystore" style={inputStyle} />
+          </div>
+
+          {/* Provider */}
+          <div style={sectionStyle}>
+            <label style={labelStyle}>Cloud Provider</label>
+            <div style={{ display:"flex", gap:6 }}>
+              {[{v:"google",l:"GCP"},{v:"aws",l:"AWS"},{v:"azurerm",l:"Azure"}].map(p => (
+                <button key={p.v} onClick={() => setProvider(p.v)} style={{
+                  flex:1, background: provider===p.v ? PROVIDER_COLORS[p.v]+"22" : "#0D1117",
+                  border:`1px solid ${provider===p.v ? PROVIDER_COLORS[p.v]+"66" : "#21262D"}`,
+                  borderRadius:5, color: provider===p.v ? PROVIDER_COLORS[p.v] : "#484F58",
+                  fontSize:11, padding:"5px 0", cursor:"pointer", fontFamily:"inherit",
+                  fontWeight: provider===p.v ? 700 : 400,
+                }}>{p.l}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Optional module path */}
+          <div style={sectionStyle}>
+            <label style={labelStyle}>Module Path <span style={{textTransform:"none"}}>(optional)</span></label>
+            <input value={modulePath} onChange={e => setModulePath(e.target.value)}
+              placeholder="output/bigquery_2025…  — leave blank to doc by name only"
+              style={inputStyle} />
+            <div style={{ fontSize:9.5, color:"#484F58", marginTop:4, lineHeight:1.4 }}>
+              If set, inputs/outputs/resources are read from the .tf files there.
+            </div>
+          </div>
+
+          {/* Fetch Google docs toggle */}
+          <div style={sectionStyle}>
+            <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer" }}>
+              <input type="checkbox" checked={fetchDocs} onChange={e => setFetchDocs(e.target.checked)} />
+              <span style={{ fontSize:11.5, color:"#E6EDF3" }}>Fetch Google official docs</span>
+            </label>
+            <div style={{ fontSize:9.5, color:"#484F58", marginTop:4, lineHeight:1.4 }}>
+              Pulls product overview, features &amp; security notes from cloud.google.com and the Terraform registry, then synthesises with the local LLM.
+            </div>
+          </div>
+
+          {/* Doc types */}
+          <div style={sectionStyle}>
+            <label style={labelStyle}>Document Types</label>
+            <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+              {Object.keys(DOC_TYPE_LABELS).map(dt => (
+                <label key={dt} style={{ display:"flex", alignItems:"center", gap:8,
+                  cursor:"pointer", fontSize:11, color: docTypes.includes(dt) ? "#E6EDF3" : "#8B949E" }}>
+                  <input type="checkbox" checked={docTypes.includes(dt)} onChange={() => toggleDocType(dt)} />
+                  {dt} <span style={{ color:"#484F58", fontSize:9.5 }}>· {DOC_TYPE_LABELS[dt]}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Phase 1: Preview */}
+          <button onClick={handlePreview} disabled={previewing || !ollamaOk}
+            style={{ width:"100%", background: previewing ? "#21262D" : "#1F6FEB22",
+              border:"1px solid #1F6FEB66", borderRadius:6, color:"#58A6FF",
+              fontSize:12, fontWeight:600, padding:"9px 0", cursor: previewing ? "default" : "pointer",
+              fontFamily:"inherit", marginTop:6 }}>
+            {previewing ? "Generating preview…" : "① Generate Preview (local)"}
+          </button>
+
+          {/* Phase 2: Publish — enabled only after a successful preview */}
+          <button onClick={handlePublish} disabled={!preview || publishing || !confluenceReady}
+            style={{ width:"100%", marginTop:8,
+              background: (!preview || !confluenceReady) ? "#0D1117" : (publishing ? "#21262D" : "#3FB95022"),
+              border:`1px solid ${(!preview || !confluenceReady) ? "#21262D" : "#3FB95066"}`,
+              borderRadius:6, color: (!preview || !confluenceReady) ? "#484F58" : "#3FB950",
+              fontSize:12, fontWeight:600, padding:"9px 0",
+              cursor: (!preview || publishing || !confluenceReady) ? "default" : "pointer",
+              fontFamily:"inherit" }}>
+            {publishing ? "Publishing…" : "② Publish to Confluence"}
+          </button>
+
+          {/* Confluence config status */}
+          <div style={{ marginTop:8, fontSize:9.5, lineHeight:1.4,
+            color: confluenceReady ? "#3FB950" : "#FFA657" }}>
+            {confluenceCfg
+              ? (confluenceReady ? "✓ Confluence configured" : `⚠ ${confluenceCfg.message || "Confluence not configured — set .env to enable publishing"}`)
+              : "Checking Confluence config…"}
+          </div>
+
+          {!ollamaOk && (
+            <div style={{ marginTop:8, fontSize:9.5, color:"#FFA657" }}>⚠ Ollama offline — start it for doc synthesis</div>
+          )}
+
+          {/* Quick link to settings */}
+          <div style={{ marginTop:14, paddingTop:12, borderTop:"1px solid #21262D",
+            fontSize:10, color:"#484F58", lineHeight:1.5 }}>
+            ⚙ Configure LLM, Confluence &amp; server settings in the{" "}
+            <span onClick={() => window.dispatchEvent(new CustomEvent("terrascope:nav", {detail:"settings"}))}
+              style={{ color:"#58A6FF", cursor:"pointer", textDecoration:"underline" }}>
+              Settings tab
+            </span>
+          </div>
+
+          {error && (
+            <div style={{ marginTop:10, background:"#F8514911", border:"1px solid #F8514933",
+              borderRadius:6, padding:"8px 10px", fontSize:11, color:"#F85149", lineHeight:1.5 }}>
+              {error}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Right panel: preview / published results ── */}
+      <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
+        {!preview && (
+          <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+            flexDirection:"column", color:"#484F58", gap:10, padding:30, textAlign:"center" }}>
+            <div style={{ fontSize:40 }}>📄</div>
+            <div style={{ fontSize:13, color:"#8B949E" }}>Generate a local preview to verify before publishing</div>
+            <div style={{ fontSize:11, maxWidth:420, lineHeight:1.6 }}>
+              Enter any GCP/AWS/Azure product name and click <strong>Generate Preview</strong>. TerraScope fetches the official docs, fills the template, and renders each document here — entirely locally. Publishing to Confluence is a separate, deliberate second step.
+            </div>
+          </div>
+        )}
+
+        {preview && (
+          <>
+            {/* Published banner with URLs */}
+            {published && (
+              <div style={{ background:"#3FB95011", borderBottom:"1px solid #3FB95033", padding:"10px 16px" }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"#3FB950", marginBottom:6 }}>
+                  ✓ Published to Confluence{published.space_key ? ` · space ${published.space_key}` : ""}
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                  {published.pages.filter(p => p.page_url).map(p => (
+                    <a key={p.doc_type} href={p.page_url} target="_blank" rel="noreferrer"
+                      style={{ fontSize:11, color:"#58A6FF", textDecoration:"none" }}>
+                      🔗 {p.doc_type} → {p.page_url}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Sources used */}
+            {(preview.sources_used?.length > 0 || preview.official_doc_urls?.length > 0) && (
+              <div style={{ background:"#161B22", borderBottom:"1px solid #21262D", padding:"8px 16px",
+                display:"flex", gap:14, flexWrap:"wrap", alignItems:"center", fontSize:10 }}>
+                {preview.sources_used?.length > 0 && (
+                  <span style={{ color:"#8B949E" }}>
+                    Sources: {preview.sources_used.map(s => (
+                      <span key={s} style={{ color:"#3FB950", marginLeft:5 }}>{s}</span>
+                    ))}
+                  </span>
+                )}
+                {preview.official_doc_urls?.map(u => (
+                  <a key={u} href={u} target="_blank" rel="noreferrer"
+                    style={{ color:"#58A6FF", textDecoration:"none" }}>{u}</a>
+                ))}
+              </div>
+            )}
+
+            {/* Doc type tabs */}
+            <div style={{ display:"flex", gap:2, padding:"8px 16px 0", borderBottom:"1px solid #21262D",
+              background:"#0D1117", overflowX:"auto" }}>
+              {pages.map((p, i) => (
+                <button key={p.doc_type} onClick={() => setActiveDoc(i)} style={{
+                  background: activeDoc===i ? "#161B22" : "transparent",
+                  border:"1px solid #21262D", borderBottom: activeDoc===i ? "1px solid #161B22" : "1px solid #21262D",
+                  borderRadius:"5px 5px 0 0", padding:"5px 12px", cursor:"pointer", whiteSpace:"nowrap",
+                  fontSize:11, color: p.status==="error" ? "#F85149" : (activeDoc===i ? "#E6EDF3" : "#484F58"),
+                  fontFamily:"inherit", fontWeight: activeDoc===i ? 600 : 400,
+                }}>
+                  {p.status === "error" ? "✗ " : ""}{p.doc_type}
+                </button>
+              ))}
+            </div>
+
+            {/* Rendered document preview */}
+            <div style={{ flex:1, overflowY:"auto", padding:"20px 28px", background:"#0D1117" }}>
+              {pages[activeDoc]?.error ? (
+                <div style={{ color:"#F85149", fontSize:12 }}>Error: {pages[activeDoc].error}</div>
+              ) : (
+                <>
+                  {pages[activeDoc]?.dry_run_path && (
+                    <div style={{ fontSize:10, color:"#484F58", marginBottom:12, fontFamily:"monospace" }}>
+                      Saved locally: {pages[activeDoc].dry_run_path}
+                    </div>
+                  )}
+                  <div className="docgen-preview"
+                    style={{ background:"#FFFFFF", color:"#1a1a1a", borderRadius:8,
+                      padding:"32px 40px", maxWidth:820, margin:"0 auto", lineHeight:1.6 }}
+                    dangerouslySetInnerHTML={{ __html: pages[activeDoc]?.dry_run_html || "" }} />
+                </>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -2039,22 +2150,14 @@ function CurationPanel({ repos, health }) {
       {/* ── Right panel: Q&A or code viewer ── */}
       <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
         {hasResult ? (
-          <>
-            <div style={{ flex:1, overflow:"hidden" }}>
-              <CodeViewer
-                files={session.result.files}
-                outputDir={session.result.output_dir}
-                summary={session.result.summary}
-                usageExample={session.result.usage_example}
-                gitTag={session.result.git_tag_created ? session.result.git_tag_name : null}
-                validation={session.result.validation ?? null}
-              />
-            </div>
-            <DocgenPanel
-              sessionId={session.session_id}
-              productName={session.service_name}
-            />
-          </>
+          <CodeViewer
+            files={session.result.files}
+            outputDir={session.result.output_dir}
+            summary={session.result.summary}
+            usageExample={session.result.usage_example}
+            gitTag={session.result.git_tag_created ? session.result.git_tag_name : null}
+            validation={session.result.validation ?? null}
+          />
         ) : (
           <CurationChat
             session={session}
@@ -2063,6 +2166,455 @@ function CurationPanel({ repos, health }) {
             generating={generating || session?.status === "generating"}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  GENERAL CHAT PANEL — ask anything; auto-searches all indexed repos
+// ══════════════════════════════════════════════════════════════════════════════
+
+const CHAT_MODE_BADGES = {
+  grounded: { label:"✓ from your repos",      color:"#3FB950" },
+  mixed:    { label:"◐ repos + general",       color:"#58A6FF" },
+  general:  { label:"○ general knowledge",     color:"#FFA657" },
+};
+
+function GeneralChatPanel({ health }) {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const bottomRef = useRef(null);
+  const ollamaOk = health?.ollama === "running";
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior:"smooth" }); }, [messages]);
+
+  const send = async () => {
+    const q = input.trim();
+    if (!q || busy) return;
+    setInput("");
+    const userMsg = { role:"user", content:q };
+    setMessages(prev => [...prev, userMsg, { role:"assistant", loading:true }]);
+    setBusy(true);
+    try {
+      // Send prior turns (excluding the loading placeholder) as history
+      const history = messages
+        .filter(m => !m.loading && !m.error)
+        .map(m => ({ role:m.role, content:m.content }));
+      const r = await apiPost("/chat/general", { question:q, history });
+      setMessages(prev => [...prev.slice(0, -1), {
+        role:"assistant", content:r.answer, mode:r.mode,
+        sources:r.sources || [], repos_searched:r.repos_searched || [],
+      }]);
+    } catch (e) {
+      setMessages(prev => [...prev.slice(0, -1), {
+        role:"assistant", content:e.message, error:true,
+      }]);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", background:"#0D1117" }}>
+
+      {/* Header strip */}
+      <div style={{ padding:"10px 18px", borderBottom:"1px solid #21262D",
+        display:"flex", alignItems:"center", gap:10, background:"#161B22" }}>
+        <span style={{ fontSize:13, fontWeight:700, color:"#E6EDF3" }}>🌐 General Chat</span>
+        <span style={{ fontSize:10.5, color:"#484F58" }}>
+          Ask anything — Terraform, GCP, AWS, Azure, or your own modules. All indexed repos are searched automatically.
+        </span>
+        {messages.length > 0 && (
+          <button onClick={() => setMessages([])} style={{ marginLeft:"auto",
+            background:"transparent", border:"1px solid #21262D", borderRadius:5,
+            color:"#484F58", fontSize:10, padding:"3px 10px", cursor:"pointer", fontFamily:"inherit" }}>
+            Clear chat
+          </button>
+        )}
+      </div>
+
+      {/* Message list */}
+      <div style={{ flex:1, overflowY:"auto", padding:"18px 0" }}>
+        {messages.length === 0 && (
+          <div style={{ maxWidth:560, margin:"60px auto 0", textAlign:"center", color:"#484F58", padding:"0 20px" }}>
+            <div style={{ fontSize:38, marginBottom:14 }}>🌐</div>
+            <div style={{ fontSize:14, color:"#8B949E", marginBottom:8 }}>Ask me anything</div>
+            <div style={{ fontSize:11.5, lineHeight:1.7, marginBottom:20 }}>
+              I search <strong style={{color:"#8B949E"}}>all your indexed repos</strong> automatically and combine that with general
+              Terraform / cloud knowledge. No repo or tag selection needed. Every answer is labelled
+              so you know whether it came from <span style={{color:"#3FB950"}}>your code</span>,{" "}
+              <span style={{color:"#FFA657"}}>general knowledge</span>, or <span style={{color:"#58A6FF"}}>both</span>.
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:6, alignItems:"stretch" }}>
+              {[
+                "Which of my modules create IAM bindings?",
+                "What's the difference between count and for_each?",
+                "Do any of my repos pin the google provider below v5?",
+                "How do I add CMEK encryption to a GCS bucket?",
+              ].map(s => (
+                <button key={s} onClick={() => setInput(s)} style={{
+                  background:"#161B22", border:"1px solid #21262D", borderRadius:6,
+                  color:"#8B949E", fontSize:11, padding:"8px 12px", cursor:"pointer",
+                  fontFamily:"inherit", textAlign:"left" }}>
+                  💡 {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {messages.map((m, i) => (
+          <div key={i} style={{ maxWidth:760, margin:"0 auto 14px", padding:"0 20px" }}>
+            {m.role === "user" ? (
+              <div style={{ display:"flex", justifyContent:"flex-end" }}>
+                <div style={{ background:"#1F6FEB22", border:"1px solid #1F6FEB44",
+                  borderRadius:"10px 10px 2px 10px", padding:"8px 14px", maxWidth:"80%",
+                  fontSize:12.5, color:"#E6EDF3", whiteSpace:"pre-wrap" }}>{m.content}</div>
+              </div>
+            ) : m.loading ? (
+              <div style={{ color:"#484F58", fontSize:12, padding:"4px 2px" }}>
+                Searching repos &amp; thinking…
+              </div>
+            ) : (
+              <div style={{ background: m.error ? "#F8514911" : "#161B22",
+                border:`1px solid ${m.error ? "#F8514933" : "#21262D"}`,
+                borderRadius:"10px 10px 10px 2px", padding:"10px 14px" }}>
+                {!m.error && m.mode && (
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+                    <span style={{ fontSize:9.5, fontWeight:700, padding:"2px 8px", borderRadius:10,
+                      color:CHAT_MODE_BADGES[m.mode]?.color,
+                      background:`${CHAT_MODE_BADGES[m.mode]?.color}18`,
+                      border:`1px solid ${CHAT_MODE_BADGES[m.mode]?.color}44` }}>
+                      {CHAT_MODE_BADGES[m.mode]?.label}
+                    </span>
+                    {m.repos_searched?.length > 0 && (
+                      <span style={{ fontSize:9.5, color:"#484F58" }}>
+                        searched {m.repos_searched.length} repo{m.repos_searched.length > 1 ? "s" : ""}
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div style={{ fontSize:12.5, color: m.error ? "#F85149" : "#C9D1D9",
+                  whiteSpace:"pre-wrap", lineHeight:1.65 }}>{m.content}</div>
+
+                {m.sources?.length > 0 && (
+                  <details style={{ marginTop:10 }}>
+                    <summary style={{ fontSize:10.5, color:"#58A6FF", cursor:"pointer" }}>
+                      📂 {m.sources.length} source{m.sources.length > 1 ? "s" : ""} from your repos
+                    </summary>
+                    <div style={{ marginTop:8, display:"flex", flexDirection:"column", gap:6 }}>
+                      {m.sources.map((s, j) => (
+                        <div key={j} style={{ background:"#0D1117", border:"1px solid #21262D",
+                          borderRadius:6, padding:"8px 10px" }}>
+                          <div style={{ fontSize:10, color:"#58A6FF", marginBottom:4, fontFamily:"monospace" }}>
+                            {s.repo_name} @ {s.tag} · {s.file_path} · L{s.line_start}–{s.line_end}
+                            <span style={{ color:"#484F58", marginLeft:8 }}>relevance {s.relevance}</span>
+                          </div>
+                          <pre style={{ margin:0, fontSize:10, color:"#8B949E", whiteSpace:"pre-wrap",
+                            maxHeight:120, overflow:"auto" }}>{s.snippet?.slice(0, 500)}</pre>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input bar */}
+      <div style={{ padding:"12px 20px", borderTop:"1px solid #21262D", background:"#161B22" }}>
+        <div style={{ maxWidth:760, margin:"0 auto", display:"flex", gap:8 }}>
+          <input value={input} onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && send()}
+            placeholder={ollamaOk ? "Ask anything about Terraform, cloud, or your repos…" : "Ollama is offline — start it to chat"}
+            disabled={!ollamaOk || busy}
+            style={{ flex:1, background:"#0D1117", border:"1px solid #21262D", borderRadius:8,
+              color:"#E6EDF3", fontSize:12.5, padding:"10px 14px", fontFamily:"inherit", outline:"none" }} />
+          <button onClick={send} disabled={!ollamaOk || busy || !input.trim()}
+            style={{ background: busy ? "#21262D" : "#1F6FEB", border:"none", borderRadius:8,
+              color:"#fff", fontSize:12.5, fontWeight:600, padding:"0 22px",
+              cursor: busy ? "default" : "pointer", fontFamily:"inherit" }}>
+            {busy ? "…" : "Send"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SETTINGS PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+function SettingsSection({ title, icon, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom:18, background:"#161B22", borderRadius:8,
+      border:"1px solid #21262D", overflow:"hidden" }}>
+      <div onClick={() => setOpen(!open)} style={{ padding:"10px 14px", cursor:"pointer",
+        display:"flex", alignItems:"center", gap:8, borderBottom: open ? "1px solid #21262D" : "none",
+        userSelect:"none" }}>
+        <span style={{ fontSize:14 }}>{icon}</span>
+        <span style={{ fontSize:12, fontWeight:700, color:"#E6EDF3", flex:1 }}>{title}</span>
+        <span style={{ fontSize:12, color:"#484F58" }}>{open ? "▾" : "▸"}</span>
+      </div>
+      {open && <div style={{ padding:"14px" }}>{children}</div>}
+    </div>
+  );
+}
+
+function SettingsField({ label, hint, children }) {
+  return (
+    <div style={{ marginBottom:12 }}>
+      <label style={{ display:"block", fontSize:10, color:"#484F58", textTransform:"uppercase",
+        letterSpacing:"0.06em", marginBottom:4 }}>{label}</label>
+      {children}
+      {hint && <div style={{ fontSize:9.5, color:"#484F58", marginTop:3, lineHeight:1.4 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function SettingsPanel() {
+  const [cfg, setCfg] = useState(null);
+  const [saving, setSaving] = useState({});
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [saveMsg, setSaveMsg] = useState({});
+
+  // Local editable state for each section
+  const [llm, setLlm] = useState(null);
+  const [server, setServer] = useState(null);
+  const [grounding, setGrounding] = useState(null);
+  const [confluence, setConfluence] = useState(null);
+  // Track raw token input separately (never round-trips from server)
+  const [newToken, setNewToken] = useState("");
+
+  useEffect(() => {
+    apiGet("/settings").then(data => {
+      setCfg(data);
+      setLlm(data.llm);
+      setServer(data.server);
+      setGrounding(data.grounding);
+      setConfluence({ ...data.confluence, api_token: "" }); // never pre-fill token
+    }).catch(() => {});
+  }, []);
+
+  const flash = (key, msg, isError = false) => {
+    setSaveMsg(prev => ({ ...prev, [key]: { msg, isError } }));
+    setTimeout(() => setSaveMsg(prev => ({ ...prev, [key]: null })), 4000);
+  };
+
+  const save = async (key, path, body) => {
+    setSaving(prev => ({ ...prev, [key]: true }));
+    try {
+      await apiPost(`/settings/${path}`, body);
+      flash(key, "Saved ✓");
+    } catch (e) {
+      flash(key, e.message, true);
+    } finally {
+      setSaving(prev => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const handleTest = async () => {
+    setTesting(true); setTestResult(null);
+    try {
+      const r = await apiPost("/settings/test", {});
+      setTestResult(r);
+    } catch (e) {
+      setTestResult({ error: e.message });
+    } finally {
+      setTesting(false); }
+  };
+
+  const inS = {
+    background:"#0D1117", border:"1px solid #21262D", borderRadius:5,
+    color:"#E6EDF3", fontSize:11.5, padding:"6px 10px", fontFamily:"inherit", width:"100%",
+  };
+  const btnS = (color = "#1F6FEB") => ({
+    background: `${color}22`, border:`1px solid ${color}66`, borderRadius:5,
+    color, fontSize:11, fontWeight:600, padding:"6px 14px", cursor:"pointer",
+    fontFamily:"inherit",
+  });
+  const MsgTag = ({ sk }) => saveMsg[sk]
+    ? <span style={{ fontSize:10, marginLeft:8,
+        color: saveMsg[sk].isError ? "#F85149" : "#3FB950" }}>{saveMsg[sk].msg}</span>
+    : null;
+
+  if (!cfg || !llm) {
+    return (
+      <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+        color:"#484F58", fontSize:13 }}>Loading settings…</div>
+    );
+  }
+
+  return (
+    <div style={{ flex:1, overflowY:"auto", padding:"20px 28px", background:"#0D1117" }}>
+      <div style={{ maxWidth:780, margin:"0 auto" }}>
+
+        <div style={{ marginBottom:20 }}>
+          <div style={{ fontSize:18, fontWeight:700, color:"#E6EDF3", marginBottom:4 }}>⚙ Settings</div>
+          <div style={{ fontSize:11.5, color:"#484F58" }}>
+            Changes to LLM / server / grounding are saved to <code style={{color:"#58A6FF"}}>terrascope.config.yaml</code>.
+            Confluence credentials are saved to <code style={{color:"#58A6FF"}}>.env</code> and take effect immediately.
+          </div>
+        </div>
+
+        {/* ── LLM ── */}
+        <SettingsSection title="LLM / Ollama" icon="🤖">
+          <SettingsField label="Base URL" hint="Ollama default: http://localhost:11434">
+            <input style={inS} value={llm.base_url}
+              onChange={e => setLlm(p => ({...p, base_url: e.target.value}))} />
+          </SettingsField>
+          <SettingsField label="Model" hint="Name of the model pulled in Ollama (e.g. gemma4:12b, llama3.1:8b)">
+            <input style={inS} value={llm.model}
+              onChange={e => setLlm(p => ({...p, model: e.target.value}))} />
+          </SettingsField>
+          <SettingsField label="Embedding Model" hint="Must support nomic-embed-text or mxbai-embed-large">
+            <input style={inS} value={llm.embedding_model}
+              onChange={e => setLlm(p => ({...p, embedding_model: e.target.value}))} />
+          </SettingsField>
+          <div style={{ display:"flex", gap:12 }}>
+            <SettingsField label="Temperature" hint="0.0 = deterministic">
+              <input style={{...inS, width:90}} type="number" min="0" max="2" step="0.1"
+                value={llm.temperature}
+                onChange={e => setLlm(p => ({...p, temperature: parseFloat(e.target.value)}))} />
+            </SettingsField>
+            <SettingsField label="Max Tokens">
+              <input style={{...inS, width:110}} type="number" min="256" step="256"
+                value={llm.max_tokens}
+                onChange={e => setLlm(p => ({...p, max_tokens: parseInt(e.target.value)}))} />
+            </SettingsField>
+          </div>
+          <button style={btnS()} disabled={saving.llm}
+            onClick={() => save("llm", "llm", llm)}>
+            {saving.llm ? "Saving…" : "Save LLM Settings"}
+          </button>
+          <MsgTag sk="llm" />
+        </SettingsSection>
+
+        {/* ── Confluence ── */}
+        <SettingsSection title="Confluence" icon="📘">
+          <div style={{ fontSize:10, color:"#FFA657", marginBottom:10, lineHeight:1.5 }}>
+            These are saved to <code style={{color:"#E6EDF3"}}>.env</code> in the project root.
+            Changes take effect on the next API call — no restart required.
+          </div>
+          <SettingsField label="Base URL" hint="Cloud: https://your-org.atlassian.net/wiki · DC/Server: https://confluence.your-org.com">
+            <input style={inS} value={confluence?.base_url || ""}
+              onChange={e => setConfluence(p => ({...p, base_url: e.target.value}))} />
+          </SettingsField>
+          <SettingsField label="Email" hint="Required for Cloud (email + API token). Leave blank for Data Center PAT auth.">
+            <input style={inS} value={confluence?.email || ""}
+              onChange={e => setConfluence(p => ({...p, email: e.target.value}))} />
+          </SettingsField>
+          <SettingsField label="API Token / PAT"
+            hint={cfg.confluence.api_token_set ? "Token already set — enter a new value to replace it" : "Atlassian API token (Cloud) or Personal Access Token (DC)"}>
+            <input style={inS} type="password"
+              placeholder={cfg.confluence.api_token_set ? "••••••••  (already set)" : "Paste token here"}
+              value={newToken}
+              onChange={e => setNewToken(e.target.value)} />
+          </SettingsField>
+          <SettingsField label="Space Key" hint="Leave blank to publish to your private (~) space">
+            <input style={inS} value={confluence?.space_key || ""}
+              onChange={e => setConfluence(p => ({...p, space_key: e.target.value}))} />
+          </SettingsField>
+          <SettingsField label="Parent Page Title" hint="Parent page to nest product pages under">
+            <input style={inS} value={confluence?.parent_title || ""}
+              onChange={e => setConfluence(p => ({...p, parent_title: e.target.value}))} />
+          </SettingsField>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+            <button style={btnS()} disabled={saving.confluence}
+              onClick={() => {
+                const body = { ...confluence };
+                if (newToken.trim()) body.api_token = newToken.trim();
+                delete body.api_token_set;
+                save("confluence", "confluence", body).then(() => setNewToken(""));
+              }}>
+              {saving.confluence ? "Saving…" : "Save Confluence Settings"}
+            </button>
+            <button style={btnS("#8B949E")} disabled={testing} onClick={handleTest}>
+              {testing ? "Testing…" : "Test Connections"}
+            </button>
+            <MsgTag sk="confluence" />
+          </div>
+          {testResult && (
+            <div style={{ marginTop:12, display:"flex", flexDirection:"column", gap:6 }}>
+              {testResult.error && (
+                <div style={{ color:"#F85149", fontSize:11 }}>Error: {testResult.error}</div>
+              )}
+              {Object.entries(testResult).filter(([k]) => k !== "error").map(([svc, r]) => (
+                <div key={svc} style={{ display:"flex", alignItems:"center", gap:8, fontSize:11 }}>
+                  <span style={{ width:8, height:8, borderRadius:"50%",
+                    background: r.ok ? "#3FB950" : "#F85149", flexShrink:0 }} />
+                  <span style={{ color:"#E6EDF3", textTransform:"capitalize", width:90 }}>{svc}</span>
+                  <span style={{ color: r.ok ? "#3FB950" : "#F85149" }}>{r.message}</span>
+                  {r.url && <span style={{ color:"#484F58", fontSize:10 }}>{r.url}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </SettingsSection>
+
+        {/* ── Grounding ── */}
+        <SettingsSection title="Grounding / Retrieval" icon="🎯" defaultOpen={false}>
+          <SettingsField label="Mode">
+            <select style={inS} value={grounding?.mode}
+              onChange={e => setGrounding(p => ({...p, mode: e.target.value}))}>
+              <option value="strict">Strict — only answer from indexed repo code</option>
+              <option value="balanced">Balanced — prefer repo, supplement with LLM knowledge</option>
+            </select>
+          </SettingsField>
+          <div style={{ display:"flex", gap:12 }}>
+            <SettingsField label="Min Confidence" hint="Below this → 'I don't know'">
+              <input style={{...inS, width:90}} type="number" min="0" max="1" step="0.05"
+                value={grounding?.min_confidence_threshold}
+                onChange={e => setGrounding(p => ({...p, min_confidence_threshold: parseFloat(e.target.value)}))} />
+            </SettingsField>
+            <SettingsField label="Max Chunks" hint="Top-K chunks retrieved per query">
+              <input style={{...inS, width:90}} type="number" min="1" max="20"
+                value={grounding?.max_retrieval_chunks}
+                onChange={e => setGrounding(p => ({...p, max_retrieval_chunks: parseInt(e.target.value)}))} />
+            </SettingsField>
+          </div>
+          <button style={btnS()} disabled={saving.grounding}
+            onClick={() => save("grounding", "grounding", grounding)}>
+            {saving.grounding ? "Saving…" : "Save Grounding Settings"}
+          </button>
+          <MsgTag sk="grounding" />
+        </SettingsSection>
+
+        {/* ── Server ── */}
+        <SettingsSection title="Server" icon="🖥" defaultOpen={false}>
+          <div style={{ fontSize:10, color:"#FFA657", marginBottom:10, lineHeight:1.5 }}>
+            Port and host changes require a backend restart.
+          </div>
+          <div style={{ display:"flex", gap:12 }}>
+            <SettingsField label="Host">
+              <input style={{...inS, width:140}} value={server?.host}
+                onChange={e => setServer(p => ({...p, host: e.target.value}))} />
+            </SettingsField>
+            <SettingsField label="Port">
+              <input style={{...inS, width:90}} type="number" value={server?.port}
+                onChange={e => setServer(p => ({...p, port: parseInt(e.target.value)}))} />
+            </SettingsField>
+          </div>
+          <SettingsField label="Auto-reload on code changes">
+            <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer" }}>
+              <input type="checkbox" checked={!!server?.reload}
+                onChange={e => setServer(p => ({...p, reload: e.target.checked}))} />
+              <span style={{ fontSize:11.5, color:"#E6EDF3" }}>Enable uvicorn --reload</span>
+            </label>
+          </SettingsField>
+          <button style={btnS()} disabled={saving.server}
+            onClick={() => save("server", "server", server)}>
+            {saving.server ? "Saving…" : "Save Server Settings"}
+          </button>
+          <MsgTag sk="server" />
+        </SettingsSection>
+
       </div>
     </div>
   );
@@ -2425,14 +2977,13 @@ export default function TerraScope() {
   const [repos, setRepos] = useState([]);
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [selectedTag, setSelectedTag] = useState(null);
-  const [scanAllTags, setScanAllTags] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [health, setHealth] = useState(null);
   const [indexing, setIndexing] = useState(false);
   const [sidebarTab, setSidebarTab] = useState("repos");
-  const [mainView, setMainView] = useState("chat");
+  const [mainView, setMainView] = useState("general");
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -2444,6 +2995,13 @@ export default function TerraScope() {
     apiGet("/health").then(setHealth).catch(() => {});
   }, []);
 
+  // Allow any panel to deep-link to a tab via a custom event
+  useEffect(() => {
+    const handler = (e) => setMainView(e.detail);
+    window.addEventListener("terrascope:nav", handler);
+    return () => window.removeEventListener("terrascope:nav", handler);
+  }, []);
+
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior:"smooth" }); }, [messages]);
 
   const handleSend = useCallback(async () => {
@@ -2451,18 +3009,14 @@ export default function TerraScope() {
     const question = input.trim();
     setInput("");
     const userMsg = { id:Date.now(), role:"user", content:question,
-      meta: selectedRepo
-        ? (scanAllTags ? `${selectedRepo.name} @ ALL VERSIONS` : `${selectedRepo.name} @ ${selectedTag||"latest"}`)
-        : "All repos" };
+      meta: selectedRepo ? `${selectedRepo.name} @ ${selectedTag||"latest"}` : "All repos" };
     const agentMsg = { id:Date.now()+1, role:"agent", loading:true, response:null, error:null };
     setMessages(prev => [...prev, userMsg, agentMsg]);
     setLoading(true);
     try {
       const resp = await apiPost("/query", {
         question, repo_name: selectedRepo?.name||null,
-        tag: scanAllTags ? null : (selectedTag||null),
-        scan_all_tags: scanAllTags,
-        strict_mode:true,
+        tag: selectedTag||null, strict_mode:true,
       });
       setMessages(prev => prev.map(m => m.id===agentMsg.id ? {...m, loading:false, response:resp} : m));
     } catch (e) {
@@ -2472,7 +3026,7 @@ export default function TerraScope() {
       setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [input, loading, selectedRepo, selectedTag, scanAllTags]);
+  }, [input, loading, selectedRepo, selectedTag]);
 
   const handleIndex = async () => {
     setIndexing(true);
@@ -2500,6 +3054,13 @@ export default function TerraScope() {
         button:hover { opacity:.85; }
         select { appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238B949E'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 8px center; padding-right:24px !important; }
         details summary::-webkit-details-marker { display:none; }
+        .docgen-preview h1 { font-size:24px; margin:0 0 16px; border-bottom:2px solid #eaecef; padding-bottom:8px; }
+        .docgen-preview h2 { font-size:18px; margin:22px 0 10px; color:#0b5fff; }
+        .docgen-preview p { margin:0 0 10px; }
+        .docgen-preview table { border-collapse:collapse; width:100%; margin:8px 0 16px; font-size:13px; }
+        .docgen-preview th, .docgen-preview td { border:1px solid #d0d7de; padding:6px 10px; text-align:left; }
+        .docgen-preview th { background:#f6f8fa; font-weight:600; }
+        .docgen-preview th p, .docgen-preview td p { margin:0; }
       `}</style>
 
       {/* ── Top bar ── */}
@@ -2518,13 +3079,16 @@ export default function TerraScope() {
         <div style={{ display:"flex", gap:2, background:"#0D1117",
           borderRadius:6, padding:3, border:"1px solid #21262D" }}>
           {[
-            { key:"chat",        label:"💬 Chat" },
-            { key:"curate",      label:"🔧 Curate" },
-            { key:"ga",          label:"🚀 GA Workflow" },
-            { key:"scenarios",   label:"🧪 Scenarios" },
-            { key:"troubleshoot", label:"🔍 Troubleshoot" },
+            { key:"general",     label:"🌐 Ask AI",       tip:"Ask anything — searches all repos automatically, no selection needed" },
+            { key:"chat",        label:"💬 Repo Chat",     tip:"Deep-dive Q&A on one specific repo + version (strict grounding)" },
+            { key:"curate",      label:"🔧 Curate",        tip:"Generate new Terraform modules with guided AI Q&A" },
+            { key:"docs",        label:"📄 Docs",          tip:"Generate & publish HLD/CPSD docs to Confluence" },
+            { key:"ga",          label:"🚀 GA Workflow",   tip:"Detect & apply provider GA upgrades automatically" },
+            { key:"scenarios",   label:"🧪 Scenarios",     tip:"Auto-generate terraform test scenarios" },
+            { key:"troubleshoot", label:"🔍 Troubleshoot", tip:"Diagnose Terraform errors against known issues + your code" },
+            { key:"settings",    label:"⚙ Settings",       tip:"LLM, Confluence, grounding & server configuration" },
           ].map(v => (
-            <button key={v.key} onClick={() => setMainView(v.key)} style={{
+            <button key={v.key} onClick={() => setMainView(v.key)} title={v.tip} style={{
               background: mainView===v.key ? "#161B22" : "transparent",
               border:"none", cursor:"pointer", padding:"4px 12px", borderRadius:4,
               fontSize:11, color: mainView===v.key ? "#E6EDF3" : "#484F58",
@@ -2571,7 +3135,7 @@ export default function TerraScope() {
       <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
 
         {/* ── Sidebar (only for chat + ga views) ── */}
-        {mainView !== "curate" && mainView !== "scenarios" && (
+        {mainView !== "curate" && mainView !== "scenarios" && mainView !== "docs" && mainView !== "settings" && mainView !== "general" && (
           <div style={{ width:220, borderRight:"1px solid #21262D", display:"flex",
             flexDirection:"column", background:"#161B22", flexShrink:0 }}>
             <div style={{ display:"flex", borderBottom:"1px solid #21262D" }}>
@@ -2627,50 +3191,30 @@ export default function TerraScope() {
         )}
 
         {/* ── Main area ── */}
+        {mainView === "general" && (
+          <GeneralChatPanel health={health} />
+        )}
+
         {mainView === "chat" && (
           <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
             <div style={{ height:36, borderBottom:"1px solid #21262D", display:"flex",
-              alignItems:"center", justifyContent:"space-between", padding:"0 16px", gap:10,
-              background:"#0D1117", flexShrink:0 }}>
-              <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
-                {selectedRepo ? (
-                  <>
-                    <span style={{ width:8, height:8, borderRadius:2, flexShrink:0,
-                      background: GCP_COLORS[selectedRepo.gcp_product]||GCP_COLORS.default }} />
-                    <span style={{ fontSize:11.5, color:"#C9D1D9" }}>{selectedRepo.display_name}</span>
-                    {scanAllTags ? (
-                      <>
-                        <span style={{ color:"#21262D" }}>›</span>
-                        <span style={{ fontFamily:"monospace", fontSize:11, color:"#3FB950",
-                          background:"#3FB95011", padding:"1px 6px", borderRadius:3 }}>
-                          ALL VERSIONS ({selectedRepo.indexed_tags?.length||0} indexed)
-                        </span>
-                      </>
-                    ) : selectedTag && (
-                      <>
-                        <span style={{ color:"#21262D" }}>›</span>
-                        <span style={{ fontFamily:"monospace", fontSize:11, color:"#58A6FF",
-                          background:"#1F6FEB11", padding:"1px 6px", borderRadius:3 }}>{selectedTag}</span>
-                        <StatusDot status={selectedRepo.indexed_tags?.includes(selectedTag) ? "ready" : "not_indexed"} />
-                      </>
-                    )}
-                  </>
-                ) : (
-                  <span style={{ fontSize:11, color:"#484F58" }}>Select a repo from the sidebar</span>
-                )}
-              </div>
-              {selectedRepo && (
-                <button onClick={() => setScanAllTags(v => !v)}
-                  title="Scan every indexed version of this module — the answer will cite which version (tag), file, and line each finding came from"
-                  style={{
-                    fontSize:10.5, padding:"4px 10px", borderRadius:5, flexShrink:0,
-                    border:`1px solid ${scanAllTags ? "#3FB95066" : "#21262D"}`,
-                    background: scanAllTags ? "#3FB95022" : "transparent",
-                    color: scanAllTags ? "#3FB950" : "#8B949E",
-                    cursor:"pointer", display:"flex", alignItems:"center", gap:6,
-                    fontFamily:"inherit", transition:"all 0.15s" }}>
-                  🔍 {scanAllTags ? "Scanning all versions" : "Scan all versions"}
-                </button>
+              alignItems:"center", padding:"0 16px", gap:10, background:"#0D1117", flexShrink:0 }}>
+              {selectedRepo ? (
+                <>
+                  <span style={{ width:8, height:8, borderRadius:2, flexShrink:0,
+                    background: GCP_COLORS[selectedRepo.gcp_product]||GCP_COLORS.default }} />
+                  <span style={{ fontSize:11.5, color:"#C9D1D9" }}>{selectedRepo.display_name}</span>
+                  {selectedTag && (
+                    <>
+                      <span style={{ color:"#21262D" }}>›</span>
+                      <span style={{ fontFamily:"monospace", fontSize:11, color:"#58A6FF",
+                        background:"#1F6FEB11", padding:"1px 6px", borderRadius:3 }}>{selectedTag}</span>
+                      <StatusDot status={selectedRepo.indexed_tags?.includes(selectedTag) ? "ready" : "not_indexed"} />
+                    </>
+                  )}
+                </>
+              ) : (
+                <span style={{ fontSize:11, color:"#484F58" }}>Select a repo from the sidebar</span>
               )}
             </div>
 
@@ -2686,10 +3230,7 @@ export default function TerraScope() {
                     <div style={{ fontSize:14, color:"#8B949E", marginBottom:6 }}>TerraScope ready</div>
                     <div style={{ fontSize:11.5, color:"#484F58", lineHeight:1.7 }}>
                       Ask about any tag, variable, resource,<br />
-                      issue, or change across your Terraform modules.<br />
-                      Toggle <span style={{ color:"#3FB950" }}>🔍 Scan all versions</span> to ask one
-                      question across the whole product — TerraScope cites<br />
-                      the exact tag, file, and line for every finding.
+                      issue, or change across your Terraform modules.
                     </div>
                   </div>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, maxWidth:480 }}>
@@ -2698,10 +3239,6 @@ export default function TerraScope() {
                       "What variables are required?",
                       "What changed between v1.0 and v2.0?",
                       "Why does plan fail with 403 on BigQuery?",
-                      ...(scanAllTags ? [
-                        "Which versions use deprecated GCS bucket settings, and where?",
-                        "Has the IAM binding logic changed across versions? Show file & line.",
-                      ] : []),
                     ].map((q,i) => (
                       <button key={i} onClick={() => setInput(q)} style={{
                         background:"#161B22", border:"1px solid #21262D", borderRadius:6,
@@ -2724,9 +3261,7 @@ export default function TerraScope() {
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={e => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                   placeholder={selectedRepo
-                    ? (scanAllTags
-                        ? `Ask about ${selectedRepo.display_name} across all versions…`
-                        : `Ask about ${selectedRepo.display_name} @ ${selectedTag||"latest"}…`)
+                    ? `Ask about ${selectedRepo.display_name} @ ${selectedTag||"latest"}…`
                     : "Select a repo first…"}
                   disabled={loading || !selectedRepo} rows={1}
                   style={{ flex:1, background:"none", border:"none", color:"#E6EDF3",
@@ -2756,6 +3291,12 @@ export default function TerraScope() {
           <CurationPanel repos={repos} health={health} />
         )}
 
+        {mainView === "docs" && (
+          <div style={{ flex:1, overflow:"hidden" }}>
+            <DocsPanel repos={repos} health={health} />
+          </div>
+        )}
+
         {mainView === "ga" && (
           <div style={{ flex:1, overflow:"hidden" }}>
             <GAWorkflowPanel repo={selectedRepo} health={health} />
@@ -2771,6 +3312,12 @@ export default function TerraScope() {
         {mainView === "troubleshoot" && (
           <div style={{ flex:1, overflow:"hidden" }}>
             <TroubleshootPanel repos={repos} selectedRepo={selectedRepo} />
+          </div>
+        )}
+
+        {mainView === "settings" && (
+          <div style={{ flex:1, display:"flex", overflow:"hidden" }}>
+            <SettingsPanel />
           </div>
         )}
       </div>

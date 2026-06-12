@@ -138,7 +138,7 @@ for (let i = 0; i < 120; i++) {
 - `backend/scenario_generator/planner.py`
   - PydanticAI Agent, `output_type=ScenarioPlan`
   - Scenarios: minimal, maximal, per-gate ON/OFF, boundary values, for_each>0/=0
-  - Repair loop on parse failure (gemma3:4b JSON unreliable)
+  - Repair loop on parse failure (gemma4:12b JSON unreliable)
 - `backend/scenario_generator/synthesizer.py`
   - Deterministic config assembly from ModuleSpec + ScenarioEntry
   - LLM only for realistic example values per provider

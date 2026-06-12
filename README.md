@@ -2,20 +2,23 @@
 
 > **AI-powered Terraform module curation for GCP, AWS, and Azure.**  
 > Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.  
-> **v2.4** — Confluence Documentation Generator: automatically publish HLD, CPSD, Architectural Design, and Highly Confidential Assessment pages when a module is curated.
+> **v2.5** — Google-doc-enriched documentation generator, single-command startup, and in-UI settings editor.
 
 ---
 
-## Screenshot Tour
+## What's New in v2.5
 
-| | |
-|---|---|
-| **💬 Chat** — grounded Q&A over indexed modules | **🔧 Curate** — generate modules from a service name, doc, or existing module |
-| ![Chat view](docs/screenshots/01_chat.png) | ![Curate — New Product](docs/screenshots/02_curate_new_product.png) |
-| **🚀 GA Workflow** — automated provider upgrade pipeline | **🧪 Scenarios** — generate & validate test-configuration matrices |
-| ![GA Workflow](docs/screenshots/06_ga_workflow.png) | ![Scenarios](docs/screenshots/07_scenarios.png) |
-| **🔍 Troubleshoot** — bug detection + safe upgrade recommendation | **🔧 Curate** — repo + tag selected, ready to chat |
-| ![Troubleshoot](docs/screenshots/08_troubleshoot.png) | ![Chat with repo selected](docs/screenshots/01b_chat_repo_tags.png) |
+| Feature | Description |
+|---------|-------------|
+| **🌐 Ask AI (General Chat)** | New default landing tab — ask anything; automatically searches ALL indexed repos, falls back to general LLM knowledge with clear grounded/mixed/general labelling, keeps conversation history |
+| **📄 Enhanced Doc-Gen** | Two-phase preview → publish flow with Google official docs enrichment; works for any product even without curation |
+| **🔍 Google Docs Fetch** | Pulls product overview, key features, security notes and official URLs from `cloud.google.com` + the Terraform registry; synthesises with local LLM (temperature 0.0) |
+| **📋 Rich Default Template** | Full document generated even without a `.docx` template: overview → features → APIs → IAM roles → resources → inputs → outputs → versions → security → official links |
+| **🌐 Confluence URLs** | Publish step returns clickable page URLs per doc type |
+| **⚡ Single-command startup** | `npm run dev` in `frontend/` starts both the React UI **and** the FastAPI backend automatically via a Vite plugin; set `TERRASCOPE_NO_BACKEND=1` to skip |
+| **⚙ In-UI Settings editor** | New **Settings tab** — edit LLM model/URL, Confluence credentials (saved to `.env`), grounding thresholds, and server config directly from the browser; test connections with one click |
+| **🔗 Cross-panel settings link** | Any panel that depends on a missing config shows a direct "Configure in Settings" link |
+| **🐛 Table rendering fix** | Input/output tables now populate type and description columns (pydantic model fix + real `<table>` HTML instead of pipe-separated text) |
 
 ---
 
@@ -232,7 +235,7 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 │                                 │                   │                    │ │
 │                                 │  ┌────────────────▼─────────────────┐  │ │
 │                                 │  │  Ollama   :11434                  │  │ │
-│                                 │  │  LLM: gemma3:4b                   │  │ │
+│                                 │  │  LLM: gemma4:12b                   │  │ │
 │                                 │  │  Embeddings: nomic-embed-text     │  │ │
 │                                 │  └──────────────────────────────────┘  │ │
 │                                 │                                        │ │
@@ -296,7 +299,7 @@ Download and run from [ollama.com/download](https://ollama.com/download). Ollama
 **Step 2 — Pull models**
 
 ```powershell
-ollama pull gemma3:4b          # LLM (~2.5 GB)
+ollama pull gemma4:12b          # LLM (~2.5 GB)
 ollama pull nomic-embed-text   # Embeddings (~274 MB)
 ollama list                    # Verify both appear
 ```
@@ -354,7 +357,7 @@ brew services start ollama
 brew install python@3.12 node
 
 # Pull models
-ollama pull gemma3:4b
+ollama pull gemma4:12b
 ollama pull nomic-embed-text
 
 # Clone TerraScope
@@ -404,7 +407,7 @@ terrascope:
   llm:
     provider: ollama
     base_url: http://localhost:11434
-    model: gemma3:4b              # Change to gemma3:12b for better quality (needs 8 GB RAM)
+    model: gemma4:12b              # Change to gemma3:12b for better quality (needs 8 GB RAM)
     embedding_model: nomic-embed-text
     temperature: 0.0              # Keep at 0.0 for deterministic, fact-only answers
     max_tokens: 2048
@@ -601,98 +604,83 @@ Indexing is **incremental** — already-indexed tags are skipped. You can also c
 
 ## 8. Running TerraScope
 
-You need two terminals running simultaneously.
+### ⚡ Single command (recommended — v2.5+)
 
-### Terminal 1 — Backend
+```bash
+cd frontend
+npm run dev
+```
 
+That's it. The Vite dev server **automatically spawns the FastAPI backend** alongside itself using the backend plugin in `vite.config.js`.
+
+**Python resolution order** (first match wins):
+1. `../.venv/Scripts/python.exe` — Windows virtual environment
+2. `../.venv/bin/python3` — Unix/Mac virtual environment
+3. System `python` / `python3`
+
+**To skip auto-start** (e.g. you launched the backend manually or in a debugger):
+```bash
+TERRASCOPE_NO_BACKEND=1 npm run dev
+```
+
+Both processes share a single terminal window — backend logs appear inline. Stopping Vite (`Ctrl+C`) automatically kills the backend.
+
+---
+
+### Manual two-terminal startup (alternative)
+
+**Terminal 1 — Backend**
 ```bash
 # Mac/Linux
 source .venv/bin/activate && python -m backend.main
 
 # Windows
-.venv\Scripts\activate
-python -m backend.main
+.venv\Scripts\activate && python -m backend.main
 ```
 
-Output:
-```
-TerraScope API starting...
-   LLM: gemma3:4b via http://localhost:11434
-   Repos: ['terraform-google-bigquery', ...]
-   Grounding: strict
-INFO:     Uvicorn running on http://127.0.0.1:8000
-```
-
-### Terminal 2 — Frontend
-
+**Terminal 2 — Frontend**
 ```bash
-cd frontend
-npm run dev
+cd frontend && TERRASCOPE_NO_BACKEND=1 npm run dev
 # → http://localhost:5173
 ```
 
 ### Verify
-
 ```bash
 curl http://localhost:8000/api/health
 ```
-
 ```json
-{
-  "status": "ok",
-  "ollama": "running",
-  "model": "gemma3:4b",
-  "repos_configured": 3,
-  "grounding_mode": "strict",
-  "network_available": true
-}
+{ "status": "ok", "ollama": "running", "model": "gemma4:12b", "repos_configured": 3, "grounding_mode": "strict" }
 ```
-
-The `network_available` field is new in v2.0 — when `false`, the curation pipeline automatically uses its local doc cache.
 
 ---
 
 ## 9. Using the UI
 
-The top bar has **five views**:
+The top bar has **eight views** (hover any tab for a description):
 
 ```
-🔭 TerraScope v2.3  [💬 Chat] [🔧 Curate] [🚀 GA Workflow] [🧪 Scenarios] [🔍 Troubleshoot]
+🔭 TerraScope v2.5  [🌐 Ask AI] [💬 Repo Chat] [🔧 Curate] [📄 Docs] [🚀 GA Workflow] [🧪 Scenarios] [🔍 Troubleshoot] [⚙ Settings]
 ```
 
-### 9.1 Chat — Query Existing Modules
+### 9.0 Ask AI — General Chat *(v2.5, default tab)*
+
+Ask **anything** — no repo or tag selection needed:
+
+- Every question automatically searches **all indexed repos** (top hits across every repo, ranked by relevance)
+- Questions your repos can answer get a <span style="color:green">✓ from your repos</span> badge with expandable per-repo source citations
+- General Terraform/cloud questions are answered from LLM knowledge with a <span style="color:orange">○ general knowledge</span> badge
+- Mixed answers are labelled <span style="color:blue">◐ repos + general</span>
+- Conversation history is kept, so follow-up questions work naturally
+- Endpoint: `POST /api/chat/general` with `{question, history}`
+
+Use **Repo Chat** instead when you want strict grounding against one specific repo + version.
+
+### 9.1 Repo Chat — Query Existing Modules
 
 1. Select a **repo** in the left sidebar (REPOS tab).
 2. Select a **tag** (TAGS tab) — green dot = indexed.
 3. Type a question and press **Enter**.
 4. The response shows: query type badge · confidence meter · `✓ grounded` badge · answer · expandable source citations.
-
-![Chat view — empty state with repos indexed](docs/screenshots/01_chat.png)
-*The Chat view with the backend connected (status: gemma4 · Online · STRICT GROUNDING) and three repos indexed in the sidebar.*
-
-![Chat view — repo selected, TAGS tab](docs/screenshots/01b_chat_repo_tags.png)
-*Selecting a repo switches the sidebar to the TAGS tab so you can pick the indexed version to query against.*
-
-#### 🔍 Scan all versions
-
-Don't want to pin a single tag? Click **🔍 Scan all versions** in the chat header (next to the
-repo name). Instead of querying one indexed tag, TerraScope:
-
-1. Gathers the module's most recent indexed tags (newest first, capped to bound latency).
-2. Runs the semantic search across **every** one of those versions, merges the results, and
-   re-ranks them by relevance.
-3. Instructs the LLM to name the **tag, file, and line number** for every claim — and to call
-   out whether the answer **differs across versions**.
-
-This turns "what does v2.0 do?" into "scan the whole product and tell me what changed, where,
-and why" — useful for questions like:
-
-- *"Which versions use deprecated GCS bucket settings, and where?"*
-- *"Has the IAM binding logic changed across versions? Show file & line."*
-- *"What changed between v1.0 and v2.0?"*
-
-The chat header switches to an **`ALL VERSIONS (N indexed)`** chip while this mode is active,
-and each cited source in the response shows which tag it came from.
 
 ### 9.2 Curate — Generate New Modules
 
@@ -709,19 +697,24 @@ After clicking Start, the right panel enters **Q&A mode** — the LLM asks up to
 
 Generated files appear in a **tabbed code viewer** with per-file Copy buttons. The output directory path is shown at the top.
 
-![Curate — New Product mode](docs/screenshots/02_curate_new_product.png)
-*New Product mode: pick a cloud provider, name the service, and start a guided Q&A session.*
+### 9.3 Docs — Documentation Generator *(v2.5)*
 
-![Curate — From Document mode](docs/screenshots/03_curate_from_document.png)
-*From Document mode: seed curation from an uploaded PDF / DOCX / TXT spec.*
+A dedicated panel for generating Google-doc-enriched Confluence pages for **any product**, curated or not.
 
-![Curate — From Module mode](docs/screenshots/04_curate_from_module.png)
-*From Module mode: curate starting from an existing GitHub / local / ZIP module.*
+**Left panel:**
+- **Product / Service Name** — e.g. "BigQuery", "Cloud Run", "Memorystore"
+- **Cloud Provider** — GCP / AWS / Azure
+- **Module Path** (optional) — path to a generated module directory; populates inputs/outputs/resources tables
+- **Fetch Google official docs** — toggle: pulls product overview, features and security notes from `cloud.google.com` + Terraform registry; synthesises with local LLM
+- **Document Types** — checkboxes for HLD, CPSD, Architectural Design, Highly Confidential Assessment
 
-![Curate — Self-Curation mode](docs/screenshots/05_curate_self_curation.png)
-*Self-Curation mode: modify an existing repo and publish the result under a new tag.*
+**Two-phase flow:**
+1. **① Generate Preview (local)** — renders each document in a white-page HTML view; no Confluence calls
+2. **② Publish to Confluence** — enabled only after a successful preview and only when Confluence is configured; returns clickable page URLs per doc type
 
-### 9.3 GA Workflow
+A direct link to the Settings tab appears when Confluence is not yet configured.
+
+### 9.4 GA Workflow
 
 Select a repo in the sidebar, switch to the **🚀 GA Workflow** view, and you'll see:
 
@@ -732,12 +725,9 @@ Select a repo in the sidebar, switch to the **🚀 GA Workflow** view, and you'l
   - After completion: pipeline stage list, changes breakdown with breaking reason and migration notes, logs
 - **Cloud Scan tab** — scan the cloud service's release notes for new GA features not yet in the module
 
-![GA Workflow view](docs/screenshots/06_ga_workflow.png)
-*GA Workflow view: provider/version badges, base-branch and dry-run controls, and the "🚀 Run GA Workflow" trigger.*
-
 See [GA_WORKFLOW_README.md](./GA_WORKFLOW_README.md) for full details.
 
-### 9.4 Troubleshoot
+### 9.5 Troubleshoot
 
 Switch to the **🔍 Troubleshoot** tab to analyse any module for bugs without running `terraform plan`.
 
@@ -746,9 +736,6 @@ Switch to the **🔍 Troubleshoot** tab to analyse any module for bugs without r
 - **Tag / Branch** — dropdown of all Git tags for the selected repo (type freely if not yet cloned)
 - **Problem / Error** — optional: paste an error message or describe the symptom to guide the LLM analysis
 - **Scan Module** — starts the three-stage pipeline
-
-![Troubleshoot view](docs/screenshots/08_troubleshoot.png)
-*Troubleshoot view: pick a repo and tag/branch, optionally describe the symptom, then run the three-stage scan pipeline.*
 
 **Right panel — results:**
 
@@ -782,18 +769,6 @@ Relevant fixes in v5.12.0:
 • google_bigquery_dataset: fixed IAM binding propagation delay
 • google_storage_bucket: corrected lifecycle rule type validation
 ```
-
-### 9.5 Scenarios — Test Configuration Matrix
-
-Switch to the **🧪 Scenarios** tab to generate and validate a full matrix of test configurations for a module.
-
-1. Provide the **Module Source** — a GitHub URL, or a tag/branch of an already-configured repo.
-2. Click **Load Module**.
-3. TerraScope inspects the module's variables and generates a matrix of representative test scenarios (e.g. minimal config, full-feature config, edge cases).
-4. Each scenario can be validated independently, surfacing `terraform validate`-style errors before you ever run `plan` against real infrastructure.
-
-![Scenarios view](docs/screenshots/07_scenarios.png)
-*Scenarios view: load a module by GitHub URL or tag/branch to generate and validate a matrix of test configurations.*
 
 ---
 
@@ -1001,132 +976,125 @@ A: Follow existing snake_case, add lifecycle_enabled boolean alongside the rules
 
 ---
 
-## 11. Confluence Documentation Generator
+## 11. Confluence Documentation Generator *(v2.5)*
 
-After a curation session reaches `DONE`, TerraScope can automatically publish a full documentation set to Confluence — **HLD**, **CPSD**, **Architectural Design**, and **Highly Confidential Assessment** — by cloning the structure of a reference Word document and populating it with the generated module's real metadata.
+TerraScope generates a full documentation set — **HLD**, **CPSD**, **Architectural Design**, and **Highly Confidential Assessment** — for **any product**, curated or not. v2.5 adds Google official-docs enrichment, a rich built-in template, and a two-phase local-preview → Confluence-publish flow.
 
-### 11.1 How It Works
+### 11.1 How It Works (v2.5 pipeline)
 
 ```
-Reference .docx + Generated TF module
+Product name (+ optional module path)
         │
         ▼
-   template/parser.py          ordered XML walk → DocumentIR
-        │                       (headings, tables, diagrams, {{ tokens }} preserved)
+  gcp_docs_fetcher.py        fetch product overview, features, security notes,
+        │                    official URLs from cloud.google.com + Terraform registry
+        │                    → synthesise with local LLM (temperature 0.0)
         ▼
-   metadata/extractor.py        python-hcl2 → TFModuleMetadata
-        │                       (resource types, variables, outputs, versions)
+  metadata/extractor.py      parse .tf files → TFModuleMetadata
+        │                    (resource types, variables, outputs, versions)
+        ▼  merge_docs_bundle()
+  Enriched TFModuleMetadata  (overview · key_features · security_considerations ·
+        │                     apis_required · common_roles · official_doc_urls)
         ▼
-   template/fields.py           field_map.yaml → bind {{ token }} in every IR node
-        │
+  template/parser.py         parse reference .docx → DocumentIR
+        │                    (OR use rich built-in default when no .docx exists)
         ▼
-   diagrams/resolver.py         per diagram:
-        │                       1. folder-supplied image  (assets_dir/<product>/)
-        │                       2. terraform graph | dot -Tpng  (HLD / Arch only)
-        │                       3. labelled SVG placeholder
+  template/fields.py         bind all {{ tokens }} from field_map.yaml
+        │                    → real HTML tables for inputs/outputs (v2.5 fix)
         ▼
-   render/storage_format.py     IR → Confluence storage-format XHTML
-        │
+  render/storage_format.py   IR → Confluence storage-format XHTML
+        │                    (pipe-delimited field values → real <table> elements)
         ▼
-   confluence/client.py         create / update page + upload attachments
-        │
+  ① dry_run=True             write HTML to output/docgen_dry_run/ + return inline
+  ② dry_run=False            create/update Confluence pages + return page_url per doc
         ▼
-   manifest.py                  persist page IDs → idempotent re-runs update in place
+  manifest.py                persist page IDs → idempotent re-runs update in place
 ```
 
-Re-running docgen for the same product **updates** existing pages rather than creating duplicates, tracked via `data/docgen_manifest.json` and a `terrascope:<product>` page label.
+### 11.2 Available Template Tokens (v2.5 — complete list)
 
-### 11.2 Template Setup
+| Token | Source | Format |
+|-------|--------|--------|
+| `product_name` | `metadata.service_name` | text |
+| `provider_name` | literal.Google Cloud Platform | text |
+| `module_description` | `metadata.description` | text |
+| `terraform_version` | `metadata.terraform_version` | text |
+| `provider_version` | `metadata.provider_version` | text |
+| `resource_types_list` | `metadata.resource_types` | bullet_list |
+| `module_calls_list` | `metadata.module_calls` | bullet_list |
+| `required_inputs_table` | `metadata.required_inputs` | table (name\|type\|description) |
+| `optional_inputs_table` | `metadata.optional_inputs` | table (name\|type\|default\|description) |
+| `outputs_table` | `metadata.outputs` | table (name\|description) |
+| `readme_excerpt` | `metadata.readme` | text |
+| `product_overview` | `metadata.overview` (LLM-synthesised) | text |
+| `key_features_list` | `metadata.key_features` (LLM-synthesised) | bullet_list |
+| `security_considerations_list` | `metadata.security_considerations` | bullet_list |
+| `apis_required_list` | `metadata.apis_required` | bullet_list |
+| `common_roles_list` | `metadata.common_roles` | bullet_list |
+| `official_docs_links` | `metadata.official_doc_urls` | bullet_list |
 
-Each product needs a folder under `templates/`:
+### 11.3 Setup
+
+**Confluence credentials** — set once in the **⚙ Settings** tab or manually in `.env`:
+
+```env
+CONFLUENCE_BASE_URL=https://your-org.atlassian.net/wiki
+CONFLUENCE_API_TOKEN=your_api_token
+CONFLUENCE_EMAIL=you@your-org.com        # Cloud auth; omit for DC PAT
+CONFLUENCE_SPACE_KEY=TF                   # blank = private space
+CONFLUENCE_PARENT_TITLE=TerraScope Modules
+```
+
+Verify: `GET /api/docgen/config` or click **Test Connections** in Settings.
+
+**Custom template (optional)** — if no `.docx` is provided the built-in template covers all sections. To use your own org template:
 
 ```
 templates/
 └── bigquery/
-    ├── bigquery.docx       ← Reference Word document with {{ token }} placeholders
-    └── field_map.yaml      ← Maps each token to a metadata source
+    ├── bigquery.docx   ← reference Word doc with {{ token }} placeholders
+    └── field_map.yaml  ← copy + extend templates/example/field_map.yaml
 ```
 
-**Step 1 — Add `{{ token }}` placeholders to your reference `.docx`**
+### 11.4 Using the Docs Tab (UI — recommended)
 
-Open your existing HLD / CPSD / etc. Word document and replace product-specific text with tokens:
+1. Click **📄 Docs** in the top nav.
+2. Enter a **Product / Service Name** (e.g. "BigQuery").
+3. Optionally set a **Module Path** to a generated module directory.
+4. Click **① Generate Preview (local)** — each doc type renders in a white-page HTML view.
+5. Review. Then click **② Publish to Confluence** — page URLs appear when done.
 
-| Replace | With |
-|---------|------|
-| `BigQuery` (product title) | `{{ product_name }}` |
-| Resource list | `{{ resource_types_list }}` |
-| Variables table | `{{ required_inputs_table }}` |
-| Module description | `{{ module_description }}` |
-
-Whole-paragraph placeholders (`{{ token }}` on its own line) become `FieldNode`s. Inline tokens inside existing paragraphs are also substituted.
-
-**Step 2 — Copy and edit `field_map.yaml`**
+### 11.5 API
 
 ```bash
-cp templates/example/field_map.yaml templates/bigquery/field_map.yaml
-```
+# Phase 1 — preview (always safe, no Confluence calls)
+curl -X POST http://localhost:8000/api/docgen/preview \
+  -H "Content-Type: application/json" \
+  -d '{"product_name":"bigquery","provider":"google","fetch_docs":true,"doc_types":["HLD","CPSD"]}'
 
-Available metadata sources:
+# Phase 2 — publish (requires .env configured)
+curl -X POST http://localhost:8000/api/docgen/publish \
+  -H "Content-Type: application/json" \
+  -d '{"product_name":"bigquery","provider":"google","fetch_docs":true,"doc_types":["HLD","CPSD"]}'
 
-| Source | Example value |
-|--------|---------------|
-| `metadata.service_name` | `bigquery` |
-| `metadata.description` | First line of README.md |
-| `metadata.resource_types` | `["google_bigquery_dataset", ...]` |
-| `metadata.required_inputs` | dict of `{name: {type, description}}` |
-| `metadata.optional_inputs` | same, with `default` field |
-| `metadata.outputs` | dict of `{name: {description}}` |
-| `metadata.provider_version` | `~> 5.0` |
-| `metadata.terraform_version` | `>= 1.5.0` |
-| `literal.<text>` | Static string (e.g. `literal.Google Cloud Platform`) |
-
-Supported `format` values: `text` (default), `bullet_list`, `table`.
-
-### 11.3 Running Docgen
-
-**Via API — after a curation session**
-
-```bash
-# Trigger docgen for a completed session
+# After a completed curation session
 curl -X POST http://localhost:8000/api/curate/{SESSION_ID}/docgen \
   -H "Content-Type: application/json" \
-  -d '{
-    "product_name": "bigquery",
-    "ref_template": "templates/bigquery/bigquery.docx",
-    "field_map":    "templates/bigquery/field_map.yaml",
-    "doc_types":    ["HLD", "CPSD", "Architectural Design", "Highly Confidential Assessment"]
-  }'
+  -d '{"product_name":"bigquery"}'
 ```
 
-**Via API — standalone (no session needed)**
+**Response includes** `page_url` per doc type, `official_doc_urls`, and `sources_used`.
+
+### 11.6 CLI
 
 ```bash
-curl -X POST http://localhost:8000/api/docgen/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "product_name": "bigquery",
-    "module_path":  "output/bigquery_20260601_120000",
-    "ref_template": "templates/bigquery/bigquery.docx",
-    "field_map":    "templates/bigquery/field_map.yaml"
-  }'
-```
-
-**Via CLI**
-
-```bash
-# Activate venv first
 python -m backend.module_curator.docgen.pipeline \
     --product bigquery \
-    --module-path output/bigquery_20260601_120000 \
-    --template templates/bigquery/bigquery.docx \
-    --field-map templates/bigquery/field_map.yaml
+    --module-path output/bigquery_20260601_120000/ \
+    --dry-run     # preview only; omit to publish
 ```
 
-### 11.4 Dry-Run Mode
 
-Use `"dry_run": true` (API) or `--dry-run` (CLI) to render pages locally without making any Confluence calls. HTML files are written to `output/docgen_dry_run/`:
-
-```bash
 python -m backend.module_curator.docgen.pipeline \
     --product bigquery \
     --module-path output/bigquery_20260601_120000 \
@@ -1237,7 +1205,7 @@ All endpoints at `http://localhost:8000`.
 {
   "status": "ok",
   "ollama": "running",
-  "model": "gemma3:4b",
+  "model": "gemma4:12b",
   "repos_configured": 3,
   "grounding_mode": "strict",
   "network_available": true
@@ -1260,18 +1228,6 @@ Lists all Git tags for a specific repo with indexed status.
 }
 ```
 Returns `AgentResponse` with `query_type`, `answer`, `confidence`, `grounded`, `sources[]`, `variables[]`, `resources[]`, `issue_solution`.
-
-Set `"scan_all_tags": true` (and omit `"tag"`) to search across **every indexed version** of
-the module instead of one pinned tag — see [§9.1 Scan all versions](#-scan-all-versions):
-```json
-{
-  "question": "Which versions changed the IAM binding logic, and where?",
-  "repo_name": "terraform-google-bigquery",
-  "scan_all_tags": true
-}
-```
-`tags_analyzed[]` in the response then lists every version that was scanned, and each entry
-in `sources[]` carries its own `tag` so the answer can cite tag + file + line per finding.
 
 #### `POST /api/index`
 ```json
@@ -1758,9 +1714,9 @@ Azure Functions · Blob Storage · AKS · SQL · Cosmos DB · Service Bus · Eve
 
 ### Model not found during curation
 ```
-Error code: 404 - {'error': {'message': "model 'gemma3:4b' not found"}}
+Error code: 404 - {'error': {'message': "model 'gemma4:12b' not found"}}
 ```
-Run `ollama pull gemma3:4b` and wait for the download to complete.
+Run `ollama pull gemma4:12b` and wait for the download to complete.
 
 ### PDF extraction returns blank
 `pdfplumber` works on text-based PDFs. Scanned documents need OCR pre-processing (not included). Convert to text or DOCX first.
@@ -1820,7 +1776,7 @@ Install [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visua
 A: No. If network is unavailable, it uses the local registry doc cache. Generation works 100% offline using Ollama. The first run of each service name fetches docs; subsequent runs use the cache (72h TTL).
 
 **Q: How long does code generation take?**  
-A: Typically 45–120 seconds with `gemma3:4b` (3 LLM passes). A larger model like `gemma3:12b` improves quality at the cost of 2–3× more time per pass.
+A: Typically 45–120 seconds with `gemma4:12b` (3 LLM passes). A larger model like `gemma3:12b` improves quality at the cost of 2–3× more time per pass.
 
 **Q: Can I generate modules for services not in the known service map?**  
 A: Yes. Enter any service name — TerraScope will construct a plausible resource name (e.g. `google_my_service`) and generate code based on the Q&A answers alone. For best results, prime the cache first or ensure network access so it can scrape the registry.
@@ -1847,7 +1803,7 @@ A: Yes — it reads `.tf` file contents from the local Git history via `git show
 A: Yes. The troubleshooter reads from your local Git history, so any tag that exists in the local clone (even if deleted from the remote) is analysable. Select it from the Tag dropdown.
 
 **Q: How accurate is the LLM analysis in the Troubleshooter?**  
-A: The static analysis (undefined references, security patterns, deprecated resources, provider constraints) is fully deterministic. The LLM stage adds logical analysis — quality depends on the model. With `gemma3:4b` expect good coverage of obvious anti-patterns; a larger model (`gemma3:12b`) gives more thorough results. Always review LLM suggestions — they can occasionally flag false positives.
+A: The static analysis (undefined references, security patterns, deprecated resources, provider constraints) is fully deterministic. The LLM stage adds logical analysis — quality depends on the model. With `gemma4:12b` expect good coverage of obvious anti-patterns; a larger model (`gemma3:12b`) gives more thorough results. Always review LLM suggestions — they can occasionally flag false positives.
 
 **Q: How does the version recommendation decide "safe to upgrade"?**  
 A: It parses the CHANGELOG.md for every provider version between your current version and the latest GA. A version is considered "breaking for this module" only if its `### BREAKING CHANGES` section mentions resource types that are actually used in your module. If no such breaking changes appear in the recommended version's entry, it's marked `SAFE UPGRADE`.

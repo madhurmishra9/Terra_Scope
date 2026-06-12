@@ -41,14 +41,14 @@ class FieldMap:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         self._map: dict[str, dict] = raw.get("fields", {})
 
-    def resolve(self, token: str, meta: Any, doc_type: str = "") -> str:
+    def resolve(self, token: str, meta: Any) -> str:
         """Return the formatted string value for *token* using *meta* data."""
         cfg = self._map.get(token)
         if cfg is None:
             return f"[TODO: {token}]"
         source = cfg.get("source", "")
         fmt    = cfg.get("format", "text")
-        raw    = _resolve_source(source, meta, cfg, doc_type=doc_type)
+        raw    = _resolve_source(source, meta, cfg)
         return _format_value(raw, fmt, cfg)
 
     def tokens(self) -> list[str]:
@@ -57,21 +57,15 @@ class FieldMap:
 
 # ── Source resolution ─────────────────────────────────────────────────────────
 
-def _resolve_source(source: str, meta: Any, cfg: dict, doc_type: str = "") -> Any:
+def _resolve_source(source: str, meta: Any, cfg: dict) -> Any:
     if source.startswith("literal."):
         return source[len("literal."):]
-    if source == "context.doc_type":
-        return doc_type
     if source.startswith("metadata."):
         attr = source[len("metadata."):]
         value = getattr(meta, attr, None)
         if value is None or (isinstance(value, (list, dict)) and not value):
             return cfg.get("fallback", "")
         return value
-    if source.startswith("llm."):
-        section_hint = source[len("llm."):]
-        from backend.module_curator.docgen.prose.generator import generate_prose
-        return generate_prose(section_hint, meta, doc_type)
     return cfg.get("fallback", "")
 
 
@@ -80,8 +74,8 @@ def _resolve_source(source: str, meta: Any, cfg: dict, doc_type: str = "") -> An
 def _format_value(value: Any, fmt: str, cfg: dict) -> str:
     if fmt == "bullet_list":
         if isinstance(value, list):
-            return "\n".join(f"• {item}" for item in value) if value else ""
-        return str(value)
+            return "\n".join(f"• {_clean(item)}" for item in value) if value else ""
+        return _clean(value)
 
     if fmt == "table":
         columns = cfg.get("columns", [])
@@ -89,24 +83,40 @@ def _format_value(value: Any, fmt: str, cfg: dict) -> str:
             lines = [" | ".join(columns)]
             lines.append(" | ".join(["---"] * len(columns)))
             for key, entry in value.items():
+                # Normalise entry to a plain dict (it may be a Pydantic model)
+                if hasattr(entry, "model_dump"):
+                    entry = entry.model_dump()
                 if isinstance(entry, dict):
                     row = []
                     for col in columns:
                         if col == columns[0]:
-                            row.append(key)
+                            row.append(_clean(key))
                         else:
-                            row.append(str(entry.get(col, "")))
+                            row.append(_clean(entry.get(col, "")))
                     lines.append(" | ".join(row))
                 else:
-                    row = [key] + [""] * (len(columns) - 1)
+                    row = [_clean(key)] + [""] * (len(columns) - 1)
                     lines.append(" | ".join(row))
             return "\n".join(lines)
         return str(value)
 
     # Plain text (default)
     if isinstance(value, list):
-        return ", ".join(str(v) for v in value)
-    return str(value) if value is not None else ""
+        return ", ".join(_clean(v) for v in value)
+    return _clean(value) if value is not None else ""
+
+
+def _clean(v: Any) -> str:
+    """Stringify and strip surrounding quotes / HCL interpolation artefacts."""
+    s = str(v) if v is not None else ""
+    s = s.strip()
+    # Strip a single pair of surrounding quotes that some HCL parsers leave in
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1]
+    # Collapse ${...} interpolation wrappers HCL2 sometimes emits for bare types
+    if s.startswith("${") and s.endswith("}"):
+        s = s[2:-1]
+    return s
 
 
 # ── IR binding ────────────────────────────────────────────────────────────────
@@ -115,42 +125,35 @@ def bind_fields(ir: DocumentIR, field_map: FieldMap, meta: Any) -> DocumentIR:
     """
     Return a new DocumentIR with all {{ token }} occurrences substituted.
     FieldNode.value is set; inline tokens in ParagraphNode/TableNode text
-    are replaced via regex substitution. ir.doc_type is forwarded so that
-    llm.* sources receive the correct document-type framing.
+    are replaced via regex substitution.
     """
-    doc_type  = ir.doc_type
-    new_nodes = [_bind_node(n, field_map, meta, doc_type) for n in ir.nodes]
+    new_nodes: list[IRNode] = [_bind_node(n, field_map, meta) for n in ir.nodes]
     return DocumentIR(
         nodes=new_nodes,
-        doc_type=doc_type,
+        doc_type=ir.doc_type,
         product_name=ir.product_name or getattr(meta, "service_name", ""),
-        title=_substitute(ir.title, field_map, meta, doc_type),
+        title=_substitute(ir.title, field_map, meta),
     )
 
 
-def _bind_node(node: IRNode, fm: FieldMap, meta: Any, doc_type: str = "") -> IRNode:
+def _bind_node(node: IRNode, fm: FieldMap, meta: Any) -> IRNode:
     if isinstance(node, FieldNode):
-        return FieldNode(token=node.token, value=fm.resolve(node.token, meta, doc_type))
+        return FieldNode(token=node.token, value=fm.resolve(node.token, meta))
 
     if isinstance(node, ParagraphNode):
-        from backend.module_curator.docgen.ir import RunData
-        new_runs = [
-            RunData(text=_substitute(r.text, fm, meta, doc_type), bold=r.bold, italic=r.italic)
-            for r in node.runs
-        ]
-        return ParagraphNode(text=_substitute(node.text, fm, meta, doc_type), runs=new_runs)
+        return ParagraphNode(text=_substitute(node.text, fm, meta), runs=node.runs)
 
     if isinstance(node, TableNode):
         return TableNode(
-            headers=[_substitute(h, fm, meta, doc_type) for h in node.headers],
-            rows=[[_substitute(c, fm, meta, doc_type) for c in row] for row in node.rows],
+            headers=[_substitute(h, fm, meta) for h in node.headers],
+            rows=[[_substitute(c, fm, meta) for c in row] for row in node.rows],
         )
 
     # HeadingNode and DiagramNode pass through unchanged
     return node
 
 
-def _substitute(text: str, fm: FieldMap, meta: Any, doc_type: str = "") -> str:
+def _substitute(text: str, fm: FieldMap, meta: Any) -> str:
     def _replace(m: re.Match) -> str:
-        return fm.resolve(m.group(1).strip(), meta, doc_type)
+        return fm.resolve(m.group(1).strip(), meta)
     return _TOKEN_RE.sub(_replace, text)

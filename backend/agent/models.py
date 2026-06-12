@@ -97,17 +97,9 @@ class GeneratedFile(BaseModel):
     description: str   = ""     # What this file does / what changed
 
 
-class ValidationLevel(str, Enum):
-    SECURITY = "security"
-    COST     = "cost"
-    LINT     = "lint"
-    INFO     = "info"
-    ERROR    = "error"
-
-
 class ValidationNote(BaseModel):
     """A single validation finding from the post-generation checks."""
-    level:   ValidationLevel
+    level:   str            # security | cost | lint | info | error
     file:    str            # relative file path (or "" for module-level)
     message: str
     line:    Optional[int] = None
@@ -146,16 +138,10 @@ class GenerationResponse(BaseModel):
 # ── Request models ─────────────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
-    question:      str      = Field(min_length=3, max_length=2000)
-    repo_name:     Optional[str] = None
-    tag:           Optional[str] = None
-    strict_mode:   bool = True
-    scan_all_tags: bool = Field(
-        default=False,
-        description="Scan every indexed version of the module instead of a single tag, "
-                    "merging and re-ranking results so the answer can cite which version "
-                    "(tag), file, and line each finding came from.",
-    )
+    question:    str      = Field(min_length=3, max_length=2000)
+    repo_name:   Optional[str] = None
+    tag:         Optional[str] = None
+    strict_mode: bool = True
 
 
 class IndexRequest(BaseModel):

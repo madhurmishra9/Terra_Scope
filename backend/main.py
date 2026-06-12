@@ -52,6 +52,7 @@ from backend.agent.models import (
     GenerateRequest, GenerationResponse,
 )
 from backend.agent.terrascope_agent import run_query, run_generation
+from backend.agent.general_chat import run_general_chat, GeneralChatRequest, GeneralChatResponse
 from backend.agent.tools.git_tools import list_tags_for_repo, get_latest_tag
 from backend.agent.tools.search_tools import is_indexed, get_indexed_tags, get_chunk_count
 from backend.indexer.repo_indexer import index_repo, index_all
@@ -60,6 +61,7 @@ from backend.module_curator.models import StartCurationRequest, SetSourceRequest
 from backend.registry_fetcher.registry_api import fetch_service_docs, is_network_available
 from backend.registry_fetcher.cache_manager import cache_stats
 from backend.ga_workflow.ga_router import ga_router
+from backend import settings_manager
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173", "http://127.0.0.1:5173",
         "http://localhost:3000", "http://127.0.0.1:3000",
-        "http://localhost:8080", "http://127.0.0.1:8080",
+        "http://localhost:8000", "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -235,6 +237,23 @@ async def query(request: QueryRequest):
         )
 
 
+@app.post("/api/chat/general", response_model=GeneralChatResponse)
+async def general_chat(request: GeneralChatRequest):
+    """
+    General chat — answers ANY question, automatically searching across ALL
+    indexed repos. No repo/tag selection needed. Falls back to general LLM
+    knowledge (clearly labelled) when repos don't contain the answer.
+    Maintains conversation history for follow-ups.
+    """
+    try:
+        return await run_general_chat(request)
+    except Exception as e:
+        import traceback
+        print(f"\n[/api/chat/general] ERROR — {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(500, detail=f"Chat error — {type(e).__name__}: {e}")
+
+
 # ── Generation ────────────────────────────────────────────────────────────────
 
 @app.post("/api/generate", response_model=GenerationResponse)
@@ -256,7 +275,7 @@ async def generate(request: GenerateRequest):
 
     Note: quality depends on the configured LLM.
     Recommended: qwen2.5-coder:7b or llama3.1:8b for code generation tasks.
-    Minimum:     gemma3:4b (smaller models may miss FILE markers — set a longer max_tokens).
+    Minimum:     gemma4:12b (smaller models may miss FILE markers — set a longer max_tokens).
     """
     try:
         return await run_generation(request)
@@ -476,6 +495,119 @@ async def docgen_run_standalone(request: DocgenRequest):
         return result.model_dump()
     except Exception as exc:
         raise HTTPException(500, f"Docgen failed: {exc}")
+
+
+@app.post("/api/docgen/preview")
+async def docgen_preview(request: DocgenRequest):
+    """
+    PHASE 1 — Generate documentation LOCALLY for verification (no Confluence calls).
+
+    Works even for a brand-new, un-curated product: pass just `product_name`
+    (and optionally `module_path`/`tf_files`). Fetches Google official docs,
+    fills the template, and returns the rendered HTML for each doc type plus the
+    local file paths under output/docgen_dry_run/.
+    """
+    if not request.product_name.strip():
+        raise HTTPException(400, "product_name is required")
+    req = request.model_copy(update={"dry_run": True})
+    try:
+        result = await docgen_run(req)
+        return result.model_dump()
+    except Exception as exc:
+        raise HTTPException(500, f"Docgen preview failed: {exc}")
+
+
+@app.post("/api/docgen/publish")
+async def docgen_publish(request: DocgenRequest):
+    """
+    PHASE 2 — Publish documentation to Confluence and return the page URLs.
+
+    Call this only after the preview looks correct. Requires Confluence
+    credentials in .env (verify first via GET /api/docgen/config).
+    """
+    if not request.product_name.strip():
+        raise HTTPException(400, "product_name is required")
+    ok, message = check_confluence_config()
+    if not ok:
+        raise HTTPException(400, f"Confluence not configured: {message}")
+    req = request.model_copy(update={"dry_run": False})
+    try:
+        result = await docgen_run(req)
+        return result.model_dump()
+    except Exception as exc:
+        raise HTTPException(500, f"Docgen publish failed: {exc}")
+
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+class LLMSettingsUpdate(BaseModel):
+    provider:        Optional[str]   = None
+    base_url:        Optional[str]   = None
+    model:           Optional[str]   = None
+    embedding_model: Optional[str]   = None
+    temperature:     Optional[float] = None
+    max_tokens:      Optional[int]   = None
+
+
+class ServerSettingsUpdate(BaseModel):
+    host:   Optional[str]  = None
+    port:   Optional[int]  = None
+    reload: Optional[bool] = None
+
+
+class GroundingSettingsUpdate(BaseModel):
+    mode:                     Optional[str]   = None
+    min_confidence_threshold: Optional[float] = None
+    max_retrieval_chunks:     Optional[int]   = None
+
+
+class ConfluenceSettingsUpdate(BaseModel):
+    base_url:     Optional[str] = None
+    email:        Optional[str] = None
+    api_token:    Optional[str] = None
+    space_key:    Optional[str] = None
+    parent_title: Optional[str] = None
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Return all current settings (Confluence token is masked)."""
+    return settings_manager.get_all_settings()
+
+
+@app.post("/api/settings/llm")
+async def save_llm_settings(body: LLMSettingsUpdate):
+    """Update LLM settings in terrascope.config.yaml."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    return settings_manager.update_llm_settings(updates)
+
+
+@app.post("/api/settings/server")
+async def save_server_settings(body: ServerSettingsUpdate):
+    """Update server settings in terrascope.config.yaml (requires restart)."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    return settings_manager.update_server_settings(updates)
+
+
+@app.post("/api/settings/grounding")
+async def save_grounding_settings(body: GroundingSettingsUpdate):
+    """Update grounding settings in terrascope.config.yaml."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    return settings_manager.update_grounding_settings(updates)
+
+
+@app.post("/api/settings/confluence")
+async def save_confluence_settings(body: ConfluenceSettingsUpdate):
+    """Persist Confluence credentials to .env (creates file if absent)."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    return settings_manager.update_confluence_settings(updates)
+
+
+@app.post("/api/settings/test")
+async def test_all_connections():
+    """Test Ollama and Confluence connections; returns status per service."""
+    return await settings_manager.test_connections()
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
