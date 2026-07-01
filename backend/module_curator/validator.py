@@ -24,6 +24,8 @@ from typing import Iterable, Optional
 
 import hcl2
 
+_PROJECT_TFLINT_CFG = Path(__file__).resolve().parent.parent.parent / ".tflint.hcl"
+
 from backend.registry_fetcher.schema_fetcher import (
     check_attribute,
     check_resource_type,
@@ -492,6 +494,82 @@ async def _terraform_cli_validate(
     return await asyncio.to_thread(_terraform_cli_validate_sync, files)
 
 
+# ── Layer 5: tflint (deprecations, invalid enums, nested-block rules) ─────────
+
+def _tflint_available() -> bool:
+    try:
+        r = subprocess.run(["tflint", "--version"], capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _tflint_validate_sync(files: dict[str, str]) -> list[CurationValidationIssue]:
+    """Run tflint over the module. Authoritative for deprecated arguments,
+    invalid attribute values/enums, and provider-rule violations that
+    `terraform validate` does not catch. Degrades gracefully."""
+    issues: list[CurationValidationIssue] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        for fname, content in files.items():
+            if not fname.endswith(".tf"):
+                continue
+            fpath = tmp / fname
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content, encoding="utf-8")
+
+        # If the project ships a .tflint.hcl (provider ruleset), use it.
+        proj_cfg = _PROJECT_TFLINT_CFG
+        if proj_cfg and proj_cfg.exists():
+            (tmp / ".tflint.hcl").write_text(proj_cfg.read_text(encoding="utf-8"), encoding="utf-8")
+            try:
+                subprocess.run(["tflint", "--init"], cwd=tmpdir,
+                               capture_output=True, text=True, timeout=60)
+            except Exception:
+                pass  # plugin install best-effort; core rules still run
+
+        try:
+            proc = subprocess.run(
+                ["tflint", "--format", "json", "--no-color"],
+                cwd=tmpdir, capture_output=True, text=True, timeout=60,
+            )
+        except Exception as exc:
+            print(f"[validator] tflint execution failed: {exc}")
+            return issues
+
+        try:
+            data = json.loads(proc.stdout or "{}")
+        except Exception:
+            return issues
+
+        sev_map = {"error": "error", "warning": "warning", "notice": "info"}
+        for issue in data.get("issues", []):
+            rng = issue.get("range", {})
+            rule = issue.get("rule", {})
+            tfl_sev = (rule.get("severity") or "warning").lower()
+            issues.append(CurationValidationIssue(
+                severity=sev_map.get(tfl_sev, "warning"),
+                file=Path(rng.get("filename", "")).name,
+                line=rng.get("start", {}).get("line"),
+                rule=f"tflint:{rule.get('name', 'rule')}",
+                message=issue.get("message", "")[:300],
+                suggestion=rule.get("link", ""),
+            ))
+        # tflint's own hard errors (parse/config failures)
+        for err in data.get("errors", []):
+            issues.append(CurationValidationIssue(
+                severity="error",
+                file="",
+                rule="tflint:internal",
+                message=str(err.get("message", err))[:300],
+            ))
+    return issues
+
+
+async def _tflint_validate(files: dict[str, str]) -> list[CurationValidationIssue]:
+    return await asyncio.to_thread(_tflint_validate_sync, files)
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def validate_curation(
@@ -541,6 +619,13 @@ async def validate_curation(
         except Exception as exc:
             print(f"[validator] Terraform CLI validation failed: {exc}")
             cli_available = False
+
+    print("[validator] Layer 5: tflint")
+    if _tflint_available():
+        try:
+            all_issues.extend(await _tflint_validate(files))
+        except Exception as exc:
+            print(f"[validator] tflint validation failed: {exc}")
 
     error_count = sum(1 for i in all_issues if i.severity == "error")
     warning_count = sum(1 for i in all_issues if i.severity == "warning")

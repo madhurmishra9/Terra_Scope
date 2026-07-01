@@ -26,6 +26,15 @@ from backend.module_curator.models import (
     GeneratedFile,
     GenerationResult,
 )
+from backend.module_curator.hcl_splitter import (
+    redistribute_module_files,
+    terraform_fmt,
+)
+from backend.module_curator.repair import repair_until_valid
+from backend.registry_fetcher.schema_context import (
+    build_schema_constraint_block,
+    validate_resource_types,
+)
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -103,8 +112,13 @@ def _security_rules(provider: str) -> list[str]:
     return common + _PROVIDER_SECURITY_RULES.get(provider, [])
 
 
-def _build_main_prompt(session: CurationSession) -> str:
-    """Pass A — generate main.tf only (all resources, locals, data sources)."""
+def _build_main_prompt(session: CurationSession, schema_block: str = "") -> str:
+    """Pass A — generate main.tf only (all resources, locals, data sources).
+
+    When `schema_block` is supplied (the authoritative provider schema for the
+    planned resource types), it becomes the primary grounding and registry prose
+    is trimmed to protect the 8K context window.
+    """
     prov = session.provider.value
     prov_pin = _PROVIDER_VERSION_PINS.get(prov, ">= 4.0")
     svc = session.service_name or "see requirements"
@@ -116,7 +130,12 @@ def _build_main_prompt(session: CurationSession) -> str:
         "",
     ]
 
-    if session.registry_docs and not session.registry_docs.startswith("["):
+    if schema_block:
+        parts += [schema_block, ""]
+        # Authoritative schema present — keep registry prose short.
+        if session.registry_docs and not session.registry_docs.startswith("["):
+            parts += ["## PROVIDER DOCS (wiring/examples only)", session.registry_docs[:1500], ""]
+    elif session.registry_docs and not session.registry_docs.startswith("["):
         parts += ["## PROVIDER DOCUMENTATION (use these exact resource types and arguments)", session.registry_docs[:5500], ""]
 
     if session.document_text:
@@ -901,6 +920,62 @@ async def _run_pass_c(session: CurationSession, all_files: dict[str, str]) -> "G
     return GenerationPassResult(pass_name="C", raw=raw, files=files, fallback_used=fallback_used)
 
 
+# ── Schema grounding: plan resource types, then fetch their schema ───────────
+
+async def _plan_resource_types(session: CurationSession) -> list[str]:
+    """Ask the model which resource types the module needs, then keep only the
+    ones that actually exist in the provider schema.
+
+    This is a tiny, cheap pass whose output we sanitise against the schema, so
+    the expensive Pass A never anchors on a hallucinated resource type.
+    """
+    prov = session.provider.value
+    ctx_lines: list[str] = []
+    if session.registry_docs and not session.registry_docs.startswith("["):
+        ctx_lines.append(session.registry_docs[:1500])
+    for qa in session.qa_pairs[:8]:
+        ctx_lines.append(f"Q: {qa.question}\nA: {qa.answer}")
+    if session.document_text:
+        ctx_lines.append(session.document_text[:1200])
+
+    prompt = "\n".join([
+        f"For a {prov} Terraform module for '{session.service_name or 'the requirements below'}',",
+        "list the EXACT provider resource types it needs "
+        f"(e.g. google_storage_bucket). Provider prefix is '{prov}_'.",
+        "Output ONLY a JSON array of resource-type strings, nothing else.",
+        "",
+        "## CONTEXT",
+        *ctx_lines,
+    ])
+
+    try:
+        raw = await _call_llm(prompt)
+    except Exception as exc:
+        print(f"[code_generator] Resource-type planning failed: {exc}")
+        return []
+
+    stripped = _strip_fences(raw)
+    candidates: list[str] = []
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        parsed = None
+    if isinstance(parsed, list):
+        candidates = [str(x) for x in parsed]
+    elif isinstance(parsed, dict):
+        for v in parsed.values():
+            if isinstance(v, list):
+                candidates = [str(x) for x in v]
+                break
+    if not candidates:
+        # last resort: regex out provider_-prefixed identifiers (incl. embedded)
+        candidates = re.findall(rf"\b{re.escape(prov)}_[a-z0-9_]+\b", raw)
+
+    validated = await validate_resource_types(prov, candidates)
+    print(f"[code_generator] Planned resource types ({len(validated)}): {validated}")
+    return validated
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def generate_terraform_code(session: CurationSession) -> GenerationResult:
@@ -910,10 +985,18 @@ async def generate_terraform_code(session: CurationSession) -> GenerationResult:
     summary = f"Terraform {prov} module for {svc}"
     usage   = ""
 
+    # ── Schema grounding (plan resource types → fetch authoritative schema) ────
+    schema_block = ""
+    try:
+        planned_types = await _plan_resource_types(session)
+        schema_block = await build_schema_constraint_block(prov, planned_types)
+    except Exception as exc:
+        print(f"[code_generator] Schema grounding skipped: {exc}")
+
     # ── Pass A: main.tf ───────────────────────────────────────────────────────
     print(f"[code_generator] Pass A — main.tf ({svc}, {prov})")
     try:
-        raw_a   = await _call_llm(_build_main_prompt(session))
+        raw_a   = await _call_llm(_build_main_prompt(session, schema_block))
         files_a = _extract_file_markers(raw_a)
         for fname, content in files_a.items():
             if _is_valid_hcl_content(content, fname):
@@ -989,28 +1072,44 @@ async def generate_terraform_code(session: CurationSession) -> GenerationResult:
             except Exception as exc:
                 print(f"[code_generator] Source rewrite skipped for {fname}: {exc}")
 
-    # ── Write output files ────────────────────────────────────────────────────
+    # ── Deterministic modular layout: split into variables/locals/data/... ─────
+    all_files = redistribute_module_files(all_files)
+    all_files = terraform_fmt(all_files)
+
     out_dir = _output_dir(svc)
-    generated: list[GeneratedFile] = []
-    for fname, content in all_files.items():
-        file_path = out_dir / fname
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content, encoding="utf-8")
-        generated.append(GeneratedFile(filename=fname, content=content))
-        print(f"[curator] Written: {file_path}")
+
+    # ── Validate → repair loop (schema + terraform validate + tflint) ──────────
+    from backend.module_curator.validator import validate_curation
+    validation = None
+    try:
+        all_files, validation = await repair_until_valid(
+            all_files, out_dir, session,
+            call_llm=_call_llm,
+            validate_fn=validate_curation,
+            split_fn=redistribute_module_files,
+            fmt_fn=terraform_fmt,
+            max_rounds=3,
+        )
+    except Exception as exc:
+        print(f"[code_generator] Repair loop skipped: {exc}")
+        for fname, content in all_files.items():
+            fp = out_dir / fname
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(content, encoding="utf-8")
+
+    generated: list[GeneratedFile] = [
+        GeneratedFile(filename=f, content=c) for f, c in all_files.items()
+    ]
+    for f in all_files:
+        print(f"[curator] Written: {out_dir / f}")
 
     result = GenerationResult(
         files=generated,
         summary=summary,
         usage_example=usage,
         output_dir=str(out_dir),
+        validation=validation,
     )
-
-    try:
-        from backend.module_curator.validator import validate_curation
-        result.validation = await validate_curation(all_files, out_dir, session)
-    except Exception as exc:
-        print(f"[code_generator] Validation skipped: {exc}")
 
     if session.mode == CurationMode.SELF_CURATION and session.repo_name and session.new_tag:
         ok = await _apply_as_git_tag(session, all_files)
