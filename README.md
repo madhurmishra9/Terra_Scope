@@ -2,7 +2,18 @@
 
 > **AI-powered Terraform module curation for GCP, AWS, and Azure.**  
 > Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.  
-> **v2.5** — Google-doc-enriched documentation generator, single-command startup, and in-UI settings editor.
+> **v2.6** — Schema-grounded generation, deterministic modular layout, and an automatic validate→repair loop for more accurate modules.
+
+---
+
+## What's New in v2.6
+
+| Feature | Description |
+|---------|-------------|
+| **📐 Schema-grounded generation** | Before Pass A, TerraScope plans the resource types the module needs and validates them against the real provider schema — hallucinated resource types are dropped, and a compact "authoritative schema" block (required args + types, optional arg names, nested blocks) is injected so the model generates against the actual schema instead of guessing |
+| **🧩 Deterministic modular layout** | The LLM emits one HCL body; a brace-depth-aware splitter routes every top-level block to its canonical file (`variables.tf`, `outputs.tf`, `locals.tf`, `data.tf`, `main.tf`, `versions.tf`, `providers.tf`), then `terraform fmt` canonicalises it — the modular structure no longer depends on the model getting file placement right |
+| **🔁 Validate→repair loop** | After generation, `terraform validate`/schema/tflint errors are fed back to the model with only the offending files, regenerated, re-split, and re-validated — repeating (up to 3 rounds) until the module passes or stops improving |
+| **🧹 tflint validation (Layer 5)** | A new tflint layer catches deprecated arguments, invalid enum values, and provider-rule violations that `terraform validate` misses, via a shipped provider-aware `.tflint.hcl` (google/aws/azurerm rulesets) |
 
 ---
 
@@ -973,6 +984,44 @@ A: Follow existing snake_case, add lifecycle_enabled boolean alongside the rules
 ```
 
 > **Note:** Self-curation writes directly to the repo's working tree and creates a new commit + tag. Ensure you have a clean working tree or have committed pending changes before running.
+
+---
+
+### 10.5 Accuracy Pipeline — Schema Grounding, Modular Layout & Repair *(v2.6)*
+
+Every generation now runs through an accuracy pipeline that grounds the model in the real provider schema, enforces a deterministic file layout, and repairs validation errors before returning the module.
+
+```
+Q&A + registry docs
+        │
+        ▼
+  _plan_resource_types()      ask the model which resource types are needed,
+        │                     then drop any that don't exist in the schema
+        ▼
+  build_schema_constraint_block()   compact "authoritative schema" block
+        │                           (required args+types, optional names, nested blocks)
+        ▼
+  Pass A / B / C              LLM generation, grounded on the schema block
+        │
+        ▼
+  redistribute_module_files()  route top-level blocks → canonical .tf files
+  terraform_fmt()              canonicalise spacing/alignment
+        │
+        ▼
+  repair_until_valid()         validate → feed errors back → re-split → re-fmt
+        │                      (≤ 3 rounds, stops early if no improvement)
+        ▼
+  validated module written to ./output/
+```
+
+| Stage | File | What it does |
+|-------|------|--------------|
+| **Schema grounding** | `backend/registry_fetcher/schema_context.py` | Validates planned resource types against the provider schema and builds a terse, char-budgeted "allowed arguments" block for the prompt. Returns empty (falls back to registry docs) when offline |
+| **Modular layout** | `backend/module_curator/hcl_splitter.py` | Brace-depth-aware scanner (tolerant of strings, heredocs, comments) that routes each block to its canonical file, then runs `terraform fmt`. Non-`.tf` files (README, examples, tfvars) pass through untouched |
+| **Repair loop** | `backend/module_curator/repair.py` | Feeds the exact validator errors — and only the offending files — back to the model, applies the fix, re-splits, re-fmts, and re-validates until clean or the round cap is hit |
+| **tflint (Layer 5)** | `backend/module_curator/validator.py` + `.tflint.hcl` | Adds deprecation/enum/provider-rule checks on top of the existing HCL-syntax, required-attribute, naming, and `terraform validate` layers |
+
+> All stages degrade gracefully: if the schema is unavailable, `terraform`/`tflint` are not installed, or a repair pass produces nothing usable, the pipeline falls back to the previous behaviour rather than failing the generation.
 
 ---
 
