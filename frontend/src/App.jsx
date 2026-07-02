@@ -1266,7 +1266,29 @@ function ValidationPanel({ validation }) {
   );
 }
 
-function CodeViewer({ files, outputDir, summary, usageExample, gitTag, validation }) {
+function EscalationBanner({ outcome, outstandingIssues = [] }) {
+  if (outcome !== "escalated" && outcome !== "failed") return null;
+  const isFailed = outcome === "failed";
+  return (
+    <div style={{ margin:"10px 16px 0", background: isFailed ? "#F8514911" : "#FFA65711",
+      border:`1px solid ${isFailed ? "#F8514933" : "#FFA65733"}`, borderRadius:6, padding:"8px 10px" }}>
+      <div style={{ fontSize:12, fontWeight:700, color: isFailed ? "#F85149" : "#FFA657", marginBottom: outstandingIssues.length ? 6 : 0 }}>
+        {isFailed ? "❌ Generation failed" : "⚠️ Escalated — repair budget exhausted, human review required"}
+      </div>
+      {outstandingIssues.length > 0 && (
+        <ul style={{ margin:0, paddingLeft:18, fontSize:11, color:"#8B949E", lineHeight:1.6 }}>
+          {outstandingIssues.map((issue, i) => <li key={i}>{issue}</li>)}
+        </ul>
+      )}
+      <div style={{ fontSize:10.5, color:"#8B949E", marginTop:6 }}>
+        This output was NOT approved by the verification gauntlet — it is written to a
+        <code style={{ margin:"0 4px" }}>-ESCALATED</code> folder and must not be treated as shippable.
+      </div>
+    </div>
+  );
+}
+
+function CodeViewer({ files, outputDir, summary, usageExample, gitTag, validation, outcome, outstandingIssues }) {
   const [selected, setSelected] = useState(files[0]?.filename || "");
   const activeFile = files.find(f => f.filename === selected);
 
@@ -1279,7 +1301,9 @@ function CodeViewer({ files, outputDir, summary, usageExample, gitTag, validatio
     <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
       {/* Summary bar */}
       <div style={{ padding:"10px 16px", background:"#0D1117", borderBottom:"1px solid #21262D", flexShrink:0 }}>
-        <div style={{ fontSize:12, color:"#3FB950", marginBottom:4, fontWeight:700 }}>✅ Code Generated Successfully</div>
+        <div style={{ fontSize:12, color: outcome === "escalated" || outcome === "failed" ? "#FFA657" : "#3FB950", marginBottom:4, fontWeight:700 }}>
+          {outcome === "failed" ? "❌ Generation Failed" : outcome === "escalated" ? "⚠️ Generated — Escalated for Review" : "✅ Code Generated Successfully"}
+        </div>
         {summary && <div style={{ fontSize:11.5, color:"#8B949E", lineHeight:1.5, marginBottom:6 }}>{summary}</div>}
         <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
           <div style={{ fontFamily:"monospace", fontSize:10.5, color:"#58A6FF", background:"#1F6FEB11",
@@ -1289,6 +1313,8 @@ function CodeViewer({ files, outputDir, summary, usageExample, gitTag, validatio
           {gitTag && <Badge label={`git tag: ${gitTag}`} color="#3FB950" />}
         </div>
       </div>
+
+      <EscalationBanner outcome={outcome} outstandingIssues={outstandingIssues} />
 
       {/* File tabs */}
       <div style={{ display:"flex", borderBottom:"1px solid #21262D", background:"#161B22", flexShrink:0, overflowX:"auto" }}>
@@ -2163,6 +2189,8 @@ function CurationPanel({ repos, health }) {
             usageExample={session.result.usage_example}
             gitTag={session.result.git_tag_created ? session.result.git_tag_name : null}
             validation={session.result.validation ?? null}
+            outcome={session.result.outcome ?? null}
+            outstandingIssues={session.result.outstanding_issues ?? []}
           />
         ) : (
           <CurationChat

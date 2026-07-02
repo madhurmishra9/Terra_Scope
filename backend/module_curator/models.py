@@ -9,6 +9,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from backend.pipeline.models import CurationOutcome
+
 
 class CurationMode(str, Enum):
     NEW_PRODUCT    = "new_product"    # Generate module from service name + registry docs
@@ -94,6 +96,8 @@ class GenerationResult(BaseModel):
     validation:        Optional[CurationValidationResult] = None
     local_modules_used: list[LocalModuleRef] = []
     dependent_modules:  list[DependentModuleRef] = []
+    outcome:            Optional[CurationOutcome] = None
+    outstanding_issues: list[str] = []
 
 
 class CurationSession(BaseModel):

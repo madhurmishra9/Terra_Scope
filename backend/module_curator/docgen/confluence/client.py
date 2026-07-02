@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import httpx
 
+from backend.http_clients import external_client
 from backend.module_curator.docgen.config import ConfluenceSettings
 
 
@@ -168,7 +169,7 @@ class ConfluenceClient:
                 "Authorization": f"Bearer {self._s.confluence_api_token}",
                 "X-Atlassian-Token": "no-check",
             }
-        with httpx.Client(timeout=60) as client:
+        with external_client(is_async=False, timeout=60) as client:
             resp = client.post(
                 url,
                 auth=auth,
@@ -206,13 +207,13 @@ class ConfluenceClient:
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
     def _get(self, url: str, params: Optional[dict] = None) -> dict:
-        with httpx.Client(timeout=20) as client:
+        with external_client(is_async=False, timeout=20) as client:
             resp = client.get(url, auth=self._auth, headers=self._headers, params=params)
             resp.raise_for_status()
             return resp.json()
 
     def _post(self, url: str, payload: Any) -> dict:
-        with httpx.Client(timeout=30) as client:
+        with external_client(is_async=False, timeout=30) as client:
             resp = client.post(
                 url, auth=self._auth, headers=self._headers,
                 content=json.dumps(payload),
@@ -221,7 +222,7 @@ class ConfluenceClient:
             return resp.json()
 
     def _put(self, url: str, payload: Any) -> dict:
-        with httpx.Client(timeout=30) as client:
+        with external_client(is_async=False, timeout=30) as client:
             resp = client.put(
                 url, auth=self._auth, headers=self._headers,
                 content=json.dumps(payload),

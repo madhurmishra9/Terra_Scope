@@ -35,6 +35,8 @@ from backend.registry_fetcher.schema_context import (
     build_schema_constraint_block,
     validate_resource_types,
 )
+from backend.pipeline.models import CurationOutcome
+from backend.http_clients import local_client
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -44,6 +46,10 @@ def _client() -> AsyncOpenAI:
     return AsyncOpenAI(
         base_url=cfg.llm.base_url.rstrip("/") + "/v1",
         api_key="ollama",
+        # Local Ollama traffic must never be proxied — an AsyncOpenAI client
+        # left to its default builds an httpx.AsyncClient with trust_env=True,
+        # which routes localhost calls through the corporate HTTP(S)_PROXY.
+        http_client=local_client(),
     )
 
 
@@ -606,6 +612,66 @@ def _minimal_tfvars(session: CurationSession) -> str:
     return "\n".join(lines)
 
 
+def _mock_value_for_type(type_str: str) -> str:
+    """A safe HCL literal for a variable's declared type — used to fill
+    required variables in the deterministic smoke test so `terraform test
+    -command=plan` can resolve the graph without real credentials."""
+    t = (type_str or "").strip().lower().removeprefix("${").removesuffix("}")
+    if t.startswith("bool"):
+        return "true"
+    if t.startswith("number"):
+        return "1"
+    if t.startswith(("list", "set", "tuple")):
+        return "[]"
+    if t.startswith(("map", "object")):
+        return "{}"
+    return '"test-value"'
+
+
+def _minimal_tf_test(session: CurationSession, all_files: dict[str, str]) -> str:
+    """Priority 5: a minimal `tests/*.tftest.hcl` smoke test, generated
+    deterministically (no LLM call) from the module's own variables/outputs.
+    `command = plan` + a mocked provider — fast, no credentials, works in a
+    local dev setup. A sandbox-project `apply` tier is a later, opt-in gate.
+    """
+    from backend.module_curator.docgen.metadata.extractor import extract_from_files
+
+    meta = extract_from_files(all_files, service_name=session.service_name)
+    prov = session.provider.value
+
+    def _bare(name: str) -> str:
+        # extract_from_files' hcl2 string-mode parse can leave the block
+        # label's surrounding quotes attached to the key — strip them so we
+        # always emit a bare HCL identifier.
+        return name.strip().strip('"')
+
+    lines = [
+        f'mock_provider "{prov}" {{}}',
+        "",
+        'run "plan_defaults" {',
+        "  command = plan",
+    ]
+    if meta.required_inputs:
+        lines.append("")
+        lines.append("  variables {")
+        for name, iv in meta.required_inputs.items():
+            lines.append(f"    {_bare(name)} = {_mock_value_for_type(iv.type)}")
+        lines.append("  }")
+
+    # 2-3 assertions on outputs, if the module declares any.
+    asserted = [_bare(n) for n in list(meta.outputs.keys())[:3]]
+    if asserted:
+        lines.append("")
+        for name in asserted:
+            lines.append("  assert {")
+            lines.append(f"    condition     = output.{name} != null")
+            lines.append(f'    error_message = "{name} output must be set"')
+            lines.append("  }")
+
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 def _parse_response(
     raw: str, session: CurationSession
 ) -> tuple[dict[str, str], str, str]:
@@ -1060,6 +1126,11 @@ async def generate_terraform_code(session: CurationSession) -> GenerationResult:
         all_files["examples/complete/main.tf"] = _minimal_example(session)
     if "terraform.tfvars.example" not in all_files:
         all_files["terraform.tfvars.example"] = _minimal_tfvars(session)
+    if not any(f.endswith(".tftest.hcl") for f in all_files):
+        try:
+            all_files["tests/defaults.tftest.hcl"] = _minimal_tf_test(session, all_files)
+        except Exception as exc:
+            print(f"[code_generator] Smoke test generation skipped: {exc}")
 
     if not usage:
         usage = _usage_from_files(all_files, prov)
@@ -1076,11 +1147,27 @@ async def generate_terraform_code(session: CurationSession) -> GenerationResult:
     all_files = redistribute_module_files(all_files)
     all_files = terraform_fmt(all_files)
 
+    # ── Embed an architecture diagram (mermaid, from real HCL) into the README ──
+    try:
+        from backend.module_curator.docgen.diagrams.hcl_graph import graph_from_hcl
+        from backend.module_curator.docgen.diagrams.readme_embed import (
+            diagram_section, upsert_diagram_section,
+        )
+        graph = graph_from_hcl(all_files)
+        if graph.nodes:
+            section = diagram_section(graph.to_mermaid(), mode="mermaid", title="Architecture")
+            readme = all_files.get("README.md", f"# {svc}\n")
+            all_files["README.md"] = upsert_diagram_section(readme, section)
+    except Exception as exc:
+        print(f"[code_generator] README diagram embed skipped: {exc}")
+
     out_dir = _output_dir(svc)
 
     # ── Validate → repair loop (schema + terraform validate + tflint) ──────────
     from backend.module_curator.validator import validate_curation
     validation = None
+    outcome = CurationOutcome.CANDIDATE_READY
+    outstanding_issues: list[str] = []
     try:
         all_files, validation = await repair_until_valid(
             all_files, out_dir, session,
@@ -1090,12 +1177,32 @@ async def generate_terraform_code(session: CurationSession) -> GenerationResult:
             fmt_fn=terraform_fmt,
             max_rounds=3,
         )
+        if validation.passed:
+            outcome = CurationOutcome.CANDIDATE_READY
+        else:
+            outcome = CurationOutcome.ESCALATED
+            outstanding_issues = [
+                f"{i.file or 'main.tf'}: {i.message}"
+                for i in validation.issues if i.severity == "error"
+            ]
     except Exception as exc:
         print(f"[code_generator] Repair loop skipped: {exc}")
+        outcome = CurationOutcome.FAILED
+        outstanding_issues = [str(exc)]
         for fname, content in all_files.items():
             fp = out_dir / fname
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
+
+    # Escalated/failed output can never be mistaken for approved output — same
+    # trick as the doc pipeline's `.ESCALATED.md` suffix.
+    if outcome is not CurationOutcome.CANDIDATE_READY:
+        escalated_dir = out_dir.with_name(out_dir.name + "-ESCALATED")
+        try:
+            out_dir.rename(escalated_dir)
+            out_dir = escalated_dir
+        except OSError as exc:
+            print(f"[code_generator] Could not rename to ESCALATED dir: {exc}")
 
     generated: list[GeneratedFile] = [
         GeneratedFile(filename=f, content=c) for f, c in all_files.items()
@@ -1109,6 +1216,8 @@ async def generate_terraform_code(session: CurationSession) -> GenerationResult:
         usage_example=usage,
         output_dir=str(out_dir),
         validation=validation,
+        outcome=outcome,
+        outstanding_issues=outstanding_issues,
     )
 
     if session.mode == CurationMode.SELF_CURATION and session.repo_name and session.new_tag:

@@ -7,8 +7,14 @@ this file only orchestrates calling order and aggregation.
 """
 from __future__ import annotations
 
-from backend.module_curator.models import CurationSession
+from typing import TYPE_CHECKING
+
 from backend.pipeline.models import CurationPipelineOutput, GenerationPassResult
+
+if TYPE_CHECKING:
+    # Type-only import — avoids a circular import at module load time since
+    # module_curator.models now imports CurationOutcome from backend.pipeline.models.
+    from backend.module_curator.models import CurationSession
 
 
 class CurationPipeline:
