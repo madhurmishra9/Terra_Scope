@@ -2,7 +2,22 @@
 
 > **AI-powered Terraform module curation for GCP, AWS, and Azure.**  
 > Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.  
-> **v2.7** — Verified-diagram docgen, escalation as a first-class outcome, a bounded documentation crawler, and policy/behavioral gates (checkov + `terraform test`).
+> **v2.7.1** — Reliability fixes: indexing no longer gets killed mid-run, GA Workflow no longer 500s, Repo Chat no longer crashes on a partially-indexed tag, and Docgen never fabricates a documentation URL.
+
+---
+
+## What's New in v2.7.1
+
+Found and fixed while validating v2.7 end-to-end against real cloned repos and a live Ollama instance:
+
+| Fix | Description |
+|---|---|
+| **🔁 Indexing survives the dev-server reloader** | `uvicorn --reload` was watching the entire project tree, including `data/` — every chunk written during indexing triggered a full server restart, silently killing the indexing job. Reload is now scoped to `backend/` only |
+| **🚀 GA Workflow no longer crashes** | `python-hcl2`'s string-mode parser wraps `variable`/`resource`/`output`/`required_providers` blocks in list-wrapped, quote-labeled dicts; four functions in `hcl_tools.py` assumed plain dicts and threw `AttributeError`/`TypeError` on every repo. All four fixed |
+| **💬 Repo Chat no longer crashes on an empty collection** | Querying a tag that's mid-indexing (or was interrupted) hit `ChromaDB`'s `n_results=0` rejection as an unhandled `TypeError`. Now returns no results gracefully instead of crashing the request |
+| **🔗 Docgen never fabricates a documentation URL** | Typing an acronym or product name outside the small hardcoded slug map fell back to a naive guess (e.g. "Cloud NAT" → `/cloud-nat/docs`, a real 404) that was presented as an "official documentation reference" regardless of whether it existed. Guessed URLs are now verified (`HEAD`/`GET`) before ever being shown; unverifiable guesses are omitted rather than fabricated. Also filters out locale-duplicate and off-topic crawl results |
+
+See [§17 Troubleshooting](#17-troubleshooting) for the two most common remaining symptoms (indexing progress and LLM response speed) and how to diagnose them.
 
 ---
 
@@ -1791,6 +1806,24 @@ Azure Functions · Blob Storage · AKS · SQL · Cosmos DB · Service Bus · Eve
 ---
 
 ## 17. Troubleshooting
+
+### Indexing never finishes / "Index Repos" seems to do nothing
+Before v2.7.1, `uvicorn --reload` watched the **entire project tree**, including `data/` (where indexing writes its ChromaDB files). Every chunk written during indexing triggered a full server restart, killing the indexing job mid-flight — every time. Fixed by scoping the reload watcher to `backend/` only. If you're on an older checkout, either update or run indexing via the CLI instead, which isn't affected by the dev-server reloader:
+```bash
+python -m backend.indexer.repo_indexer --force
+```
+
+### Ask AI / Curate / GA Workflow never respond, but nothing crashes
+This is almost always local LLM speed, not a hang. Confirm with a direct, timed Ollama call:
+```bash
+time curl -s http://localhost:11434/api/generate \
+  -d '{"model":"<your model>","stream":false,"prompt":"Say hello in one word."}'
+```
+If a one-word response takes more than a few seconds, the model is running CPU-only (no GPU acceleration) and is too slow for interactive use — `/api/health`, `/api/index/status`, and `/api/repos` stay responsive throughout, so it's isolated to whichever request is waiting on the model, not a server freeze. Two fixes:
+- Switch to a smaller/faster model (`qwen2.5-coder:7b` is the tested default) — edit `terrascope.config.yaml`'s `llm.model`.
+- Set up GPU acceleration for Ollama if your hardware supports it (`nvidia-smi` should list a GPU; if it's not found, Ollama falls back to CPU).
+
+Also check `OLLAMA_NUM_PARALLEL` — Ollama serializes every request (indexing embeddings, chat, GA analysis, docgen synthesis) when it's `1`, so concurrent operations queue behind each other rather than running in parallel.
 
 ### Ollama offline
 ```

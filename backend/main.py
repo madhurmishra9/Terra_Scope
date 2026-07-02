@@ -934,4 +934,11 @@ if __name__ == "__main__":
         host   = cfg.server.host,
         port   = cfg.server.port,
         reload = cfg.server.reload,
+        # Without this, uvicorn's reloader watches the ENTIRE project tree —
+        # including data/ (ChromaDB index files, docgen cache), output/
+        # (generated modules), and repos/ (cloned git repos). Indexing,
+        # generation, and docgen all write there continuously, so every
+        # write was triggering a full server restart mid-operation — killing
+        # in-flight indexing jobs and LLM calls. Only backend/ is source code.
+        reload_dirs = ["backend"] if cfg.server.reload else None,
     )

@@ -45,27 +45,31 @@ def get_all_variables(repo_name: str, tag: str) -> list[VariableInfo]:
         if not content:
             continue
         parsed = parse_hcl_content(content)
-        raw_vars = parsed.get("variable", {})
+        raw_vars = parsed.get("variable", [])
         if not raw_vars:
             continue
 
         lines = content.splitlines()
-        for var_name, var_body in raw_vars.items():
-            if isinstance(var_body, list):
-                var_body = var_body[0] if var_body else {}
+        for var_block in raw_vars:
+            if not isinstance(var_block, dict):
+                continue
+            for var_name, var_body in var_block.items():
+                var_name = _unquote(var_name)
+                if isinstance(var_body, list):
+                    var_body = var_body[0] if var_body else {}
 
-            # Find the line number of this variable declaration
-            line_num = _find_block_line(lines, "variable", var_name)
+                # Find the line number of this variable declaration
+                line_num = _find_block_line(lines, "variable", var_name)
 
-            results.append(VariableInfo(
-                name=var_name,
-                type=_type_to_str(var_body.get("type", "any")),
-                description=str(var_body.get("description", "")),
-                default=_safe_str(var_body.get("default")),
-                required="default" not in var_body,
-                file_path=file_path,
-                line=line_num,
-            ))
+                results.append(VariableInfo(
+                    name=var_name,
+                    type=_type_to_str(var_body.get("type", "any")),
+                    description=str(var_body.get("description", "")),
+                    default=_safe_str(var_body.get("default")),
+                    required="default" not in var_body,
+                    file_path=file_path,
+                    line=line_num,
+                ))
 
     return results
 
@@ -84,29 +88,34 @@ def get_all_resources(repo_name: str, tag: str) -> list[ResourceInfo]:
         if not content:
             continue
         parsed = parse_hcl_content(content)
-        raw_resources = parsed.get("resource", {})
+        raw_resources = parsed.get("resource", [])
         if not raw_resources:
             continue
 
         lines = content.splitlines()
-        for res_type, instances in raw_resources.items():
-            if not isinstance(instances, dict):
+        for resource_block in raw_resources:
+            if not isinstance(resource_block, dict):
                 continue
-            for res_name, res_body in instances.items():
-                if isinstance(res_body, list):
-                    res_body = res_body[0] if res_body else {}
+            for res_type, instances in resource_block.items():
+                res_type = _unquote(res_type)
+                if not isinstance(instances, dict):
+                    continue
+                for res_name, res_body in instances.items():
+                    res_name = _unquote(res_name)
+                    if isinstance(res_body, list):
+                        res_body = res_body[0] if res_body else {}
 
-                line_start = _find_block_line(lines, "resource", res_type, res_name)
-                # Extract key attributes (avoid dumping entire body)
-                attrs = _extract_key_attributes(res_body)
+                    line_start = _find_block_line(lines, "resource", res_type, res_name)
+                    # Extract key attributes (avoid dumping entire body)
+                    attrs = _extract_key_attributes(res_body)
 
-                results.append(ResourceInfo(
-                    resource_type=res_type,
-                    resource_name=res_name,
-                    file_path=file_path,
-                    line_start=line_start,
-                    attributes=attrs,
-                ))
+                    results.append(ResourceInfo(
+                        resource_type=res_type,
+                        resource_name=res_name,
+                        file_path=file_path,
+                        line_start=line_start,
+                        attributes=attrs,
+                    ))
 
     return results
 
@@ -120,15 +129,19 @@ def get_outputs(repo_name: str, tag: str) -> list[dict]:
         if not content:
             continue
         parsed = parse_hcl_content(content)
-        for out_name, out_body in parsed.get("output", {}).items():
-            if isinstance(out_body, list):
-                out_body = out_body[0] if out_body else {}
-            results.append({
-                "name": out_name,
-                "description": out_body.get("description", ""),
-                "sensitive": out_body.get("sensitive", False),
-                "file_path": file_path,
-            })
+        for out_block in parsed.get("output", []):
+            if not isinstance(out_block, dict):
+                continue
+            for out_name, out_body in out_block.items():
+                out_name = _unquote(out_name)
+                if isinstance(out_body, list):
+                    out_body = out_body[0] if out_body else {}
+                results.append({
+                    "name": out_name,
+                    "description": out_body.get("description", ""),
+                    "sensitive": out_body.get("sensitive", False),
+                    "file_path": file_path,
+                })
     return results
 
 
@@ -148,9 +161,15 @@ def get_provider_requirements(repo_name: str, tag: str) -> dict:
             continue
         if isinstance(terraform_blocks, list):
             terraform_blocks = terraform_blocks[0] if terraform_blocks else {}
+        required_providers = terraform_blocks.get("required_providers", {})
+        if isinstance(required_providers, list):
+            # `required_providers { google = {...} }` is a BLOCK (no `=`),
+            # so hcl2 wraps it as [{"google": {...}, "__is_block__": True}]
+            # rather than a plain dict — same shape as terraform_blocks above.
+            required_providers = required_providers[0] if required_providers else {}
         return {
             "required_version": terraform_blocks.get("required_version", "not specified"),
-            "required_providers": terraform_blocks.get("required_providers", {}),
+            "required_providers": required_providers,
             "source_file": file_path,
         }
     return {}
@@ -208,6 +227,14 @@ def summarize_module(repo_name: str, tag: str) -> dict:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _unquote(label: str) -> str:
+    """hcl2's string-mode parse leaves a block label's surrounding double
+    quotes attached to the key (e.g. resource "google_x" "y" -> the dict key
+    is literally '"google_x"'), so every label pulled out of a parsed block
+    needs this before use."""
+    return label.strip().strip('"')
+
 
 def _find_block_line(lines: list[str], block_type: str, *args) -> int:
     """Find the line number of an HCL block declaration."""

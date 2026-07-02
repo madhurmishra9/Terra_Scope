@@ -76,6 +76,27 @@ _GCP_DOC_SLUGS: dict[str, str] = {
     "datastream":      "datastream",
     "firestore":       "firestore",
     "filestore":       "filestore",
+    # Products whose naive slugify (strip to lowercase-hyphenated) does NOT
+    # match the real cloud.google.com path — verified against the live site.
+    "cloud dns":       "dns",
+    "dns":             "dns",
+    "cloud cdn":       "cdn",
+    "cdn":             "cdn",
+    "cloud nat":       "nat",
+    "nat":             "nat",
+    "cloud armor":     "armor",
+    "cloud tasks":     "tasks",
+    "cloud scheduler": "scheduler",
+    "cloud build":     "build",
+    "compute engine":  "compute",
+    "gce":             "compute",
+    "app engine":      "appengine",
+    "gae":             "appengine",
+    "cloud monitoring": "monitoring",
+    "cloud logging":   "logging",
+    "cloud load balancing": "load-balancing",
+    "load balancing":  "load-balancing",
+    "cloud trace":     "trace",
 }
 
 _PAGE_CAP = 15000          # chars of text kept per fetched page
@@ -164,8 +185,16 @@ async def fetch_gcp_docs(
     raw_parts: list[str] = []
     if is_network_available():
         seeds = [url for _, url in _research_urls(product_name)]
+        seed_set = set(seeds)
+        product_slug = _slug(product_name).split("/")[0]
         pages = await _bounded_crawl(seeds)
         for page in pages:
+            # Seeds are always relevant (we asked for them directly). Pages
+            # discovered via followed links are only kept if the product
+            # slug appears in their path — depth-2 crawling otherwise picks
+            # up generic site-nav/category pages unrelated to this product.
+            if page.url not in seed_set and product_slug not in page.url.lower():
+                continue
             text = _html_to_text(page.html)
             if text:
                 raw_parts.append(f"===== SOURCE: {page.url} =====\n{text}")
@@ -183,10 +212,19 @@ async def fetch_gcp_docs(
         except Exception as e:
             print(f"[docgen-research] terraform registry fetch failed: {e}")
 
-    # Always include the canonical doc URL even if every fetch failed
-    canonical = _canonical_doc_url(product_name)
-    if canonical not in bundle.official_doc_urls:
-        bundle.official_doc_urls.append(canonical)
+    # Only fall back to a *guessed* canonical URL when the crawl found no
+    # real pages, and only if that guess actually resolves. `_slug()` is a
+    # naive slugify for products outside `_GCP_DOC_SLUGS` (e.g. an acronym
+    # or an unmapped product name) and is frequently wrong — surfacing an
+    # unverified guess as an "official documentation reference" fabricates
+    # a link that may 404. A non-existent link is worse than no link.
+    if not bundle.official_doc_urls and is_network_available():
+        canonical = _canonical_doc_url(product_name)
+        if await _url_exists(canonical):
+            bundle.official_doc_urls.append(canonical)
+        else:
+            print(f"[docgen-research] guessed URL {canonical} for {product_name!r} "
+                  f"does not resolve — omitting rather than fabricating a link")
 
     raw_material = "\n\n".join(raw_parts).strip()
     bundle.raw_excerpt = raw_material[:4000]
@@ -260,6 +298,11 @@ def _fetch_sync_cached(url: str) -> str | None:
     legitimately need the corporate egress proxy; this is the opposite of
     the local Ollama client (see backend/http_clients.py).
     """
+    # Skip localized duplicates (?hl=xx) — same content in another language;
+    # following them just burns crawl budget and clutters official_doc_urls
+    # with near-duplicate links for the same page.
+    if re.search(r"[?&]hl=", url):
+        return None
     cache_file = _cache_path(url)
     if cache_file.is_file():
         try:
@@ -294,6 +337,21 @@ async def _bounded_crawl(seeds: list[str]) -> list[Page]:
     except Exception as e:
         print(f"[docgen-research] bounded crawl failed: {e}")
         return []
+
+
+async def _url_exists(url: str) -> bool:
+    """Verify a URL actually resolves before ever presenting it as an
+    'official documentation reference'. HEAD first (cheap); some pages
+    reject HEAD, so fall back to a real GET on any non-2xx/3xx HEAD result."""
+    try:
+        async with external_client(timeout=8.0, follow_redirects=True) as client:
+            r = await client.head(url)
+            if r.status_code < 400:
+                return True
+            r = await client.get(url)
+            return r.status_code < 400
+    except Exception:
+        return False
 
 
 def _html_to_text(html: str) -> str:
