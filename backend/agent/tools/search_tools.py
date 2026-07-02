@@ -107,9 +107,15 @@ def semantic_search(
     except Exception:
         return []  # Not indexed yet
 
+    available = collection.count()
+    if available == 0:
+        return []  # Collection exists but is empty (e.g. indexing was interrupted
+                    # mid-run) — chromadb rejects n_results=0, so guard explicitly
+                    # rather than crashing the whole chat/query request.
+
     results = collection.query(
         query_texts=[query],
-        n_results=min(n_results, collection.count()),
+        n_results=min(n_results, available),
         include=["documents", "metadatas", "distances"],
     )
 
