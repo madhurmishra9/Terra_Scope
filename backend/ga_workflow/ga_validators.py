@@ -58,6 +58,45 @@ REQUIRED_ATTRS: dict[str, list[str]] = {
 VALID_PRIMITIVE_TYPES = {"string", "number", "bool", "any"}
 VALID_COMPLEX_PREFIXES = {"list(", "set(", "map(", "object(", "tuple(", "optional("}
 SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+# ── python-hcl2 shape normalisation ───────────────────────────────────────────
+# hcl2 returns labelled blocks as a LIST of single-key dicts, with the label's
+# surrounding quotes attached to the key (e.g. resource "google_x" "y" ->
+# [{'"google_x"': {'"y"': {...}}}]). Iterating `.items()` on that list raised
+# AttributeError and crashed every validator on real modules.
+
+def _unquote(label: str) -> str:
+    return str(label).strip().strip('"')
+
+
+def _iter_labelled_blocks(parsed: dict, kind: str):
+    """Yield (label, body) for each top-level block of *kind*, normalised."""
+    blocks = parsed.get(kind, [])
+    if isinstance(blocks, dict):  # tolerate older parser shape
+        blocks = [blocks]
+    for entry in blocks:
+        if not isinstance(entry, dict):
+            continue
+        for label, body in entry.items():
+            if label == "__is_block__":
+                continue
+            if isinstance(body, list):
+                body = body[0] if body else {}
+            yield _unquote(label), body
+
+
+def _iter_resources(parsed: dict):
+    """Yield (res_type, res_name, body) for every resource block, normalised."""
+    for res_type, instances in _iter_labelled_blocks(parsed, "resource"):
+        if not isinstance(instances, dict):
+            continue
+        for res_name, body in instances.items():
+            if res_name == "__is_block__":
+                continue
+            if isinstance(body, list):
+                body = body[0] if body else {}
+            yield res_type, _unquote(res_name), body
 HYPHEN_RE = re.compile(r"-")
 
 COMMON_TYPE_MISTAKES = {
@@ -139,39 +178,31 @@ def validate_required_attributes(file_paths: list[str], repo_root: Path) -> Vali
         except Exception:
             continue
 
-        raw_resources = parsed.get("resource", {})
-        if not raw_resources:
-            continue
-
-        for res_type, instances in raw_resources.items():
+        for res_type, res_name, body in _iter_resources(parsed):
             required = REQUIRED_ATTRS.get(res_type, [])
-            if not required or not isinstance(instances, dict):
+            if not required:
                 continue
-
-            for res_name, body in instances.items():
-                if isinstance(body, list):
-                    body = body[0] if body else {}
-                for attr in required:
-                    if attr not in body:
-                        line_num = _find_line(content, "resource", res_type, res_name)
+            for attr in required:
+                if attr not in body:
+                    line_num = _find_line(content, "resource", res_type, res_name)
+                    issues.append(ValidationIssue(
+                        severity=ValidationSeverity.ERROR,
+                        file_path=rel_path,
+                        line=line_num,
+                        rule="required_attr_missing",
+                        message=f"`{res_type}.{res_name}` is missing required attribute `{attr}`",
+                        suggestion=f"Add `{attr} = var.{attr}` to the resource block",
+                    ))
+                else:
+                    val = body[attr]
+                    if isinstance(val, str) and not val.startswith("${") and not val.startswith("var."):
                         issues.append(ValidationIssue(
-                            severity=ValidationSeverity.ERROR,
+                            severity=ValidationSeverity.WARNING,
                             file_path=rel_path,
-                            line=line_num,
-                            rule="required_attr_missing",
-                            message=f"`{res_type}.{res_name}` is missing required attribute `{attr}`",
-                            suggestion=f"Add `{attr} = var.{attr}` to the resource block",
+                            rule="required_attr_hardcoded",
+                            message=f"`{res_type}.{res_name}.{attr}` is hardcoded — consider using a variable",
+                            suggestion=f"Replace with `var.{attr}`",
                         ))
-                    else:
-                        val = body[attr]
-                        if isinstance(val, str) and not val.startswith("${") and not val.startswith("var."):
-                            issues.append(ValidationIssue(
-                                severity=ValidationSeverity.WARNING,
-                                file_path=rel_path,
-                                rule="required_attr_hardcoded",
-                                message=f"`{res_type}.{res_name}.{attr}` is hardcoded — consider using a variable",
-                                suggestion=f"Replace with `var.{attr}`",
-                            ))
 
     passed = not any(i.severity == ValidationSeverity.ERROR for i in issues)
     return ValidatorReport(
@@ -198,9 +229,7 @@ def validate_naming_conventions(file_paths: list[str], repo_root: Path) -> Valid
         except Exception:
             continue
 
-        for var_name, var_body in parsed.get("variable", {}).items():
-            if isinstance(var_body, list):
-                var_body = var_body[0] if var_body else {}
+        for var_name, var_body in _iter_labelled_blocks(parsed, "variable"):
             line_num = _find_line(content, "variable", var_name)
 
             if not SNAKE_CASE_RE.match(var_name):
@@ -224,7 +253,7 @@ def validate_naming_conventions(file_paths: list[str], repo_root: Path) -> Valid
                     suggestion='Add `description = "..."` to the variable block',
                 ))
 
-        for out_name in parsed.get("output", {}).keys():
+        for out_name, _out_body in _iter_labelled_blocks(parsed, "output"):
             if HYPHEN_RE.search(out_name):
                 line_num = _find_line(content, "output", out_name)
                 issues.append(ValidationIssue(
@@ -236,29 +265,26 @@ def validate_naming_conventions(file_paths: list[str], repo_root: Path) -> Valid
                     suggestion=f"Rename to `{out_name.replace('-', '_')}`",
                 ))
 
-        for res_type, instances in parsed.get("resource", {}).items():
-            if not isinstance(instances, dict):
-                continue
-            for res_name in instances.keys():
-                line_num = _find_line(content, "resource", res_type, res_name)
-                if res_name and res_name[0].isdigit():
-                    issues.append(ValidationIssue(
-                        severity=ValidationSeverity.ERROR,
-                        file_path=rel_path,
-                        line=line_num,
-                        rule="naming_digit_start",
-                        message=f"Resource `{res_type}.{res_name}` name starts with a digit",
-                        suggestion="Rename to start with a letter or underscore",
-                    ))
-                if HYPHEN_RE.search(res_name):
-                    issues.append(ValidationIssue(
-                        severity=ValidationSeverity.ERROR,
-                        file_path=rel_path,
-                        line=line_num,
-                        rule="naming_no_hyphen",
-                        message=f"Resource `{res_type}.{res_name}` logical name contains a hyphen",
-                        suggestion=f"Rename to `{res_name.replace('-', '_')}`",
-                    ))
+        for res_type, res_name, _body in _iter_resources(parsed):
+            line_num = _find_line(content, "resource", res_type, res_name)
+            if res_name and res_name[0].isdigit():
+                issues.append(ValidationIssue(
+                    severity=ValidationSeverity.ERROR,
+                    file_path=rel_path,
+                    line=line_num,
+                    rule="naming_digit_start",
+                    message=f"Resource `{res_type}.{res_name}` name starts with a digit",
+                    suggestion="Rename to start with a letter or underscore",
+                ))
+            if HYPHEN_RE.search(res_name):
+                issues.append(ValidationIssue(
+                    severity=ValidationSeverity.ERROR,
+                    file_path=rel_path,
+                    line=line_num,
+                    rule="naming_no_hyphen",
+                    message=f"Resource `{res_type}.{res_name}` logical name contains a hyphen",
+                    suggestion=f"Rename to `{res_name.replace('-', '_')}`",
+                ))
 
     passed = not any(i.severity == ValidationSeverity.ERROR for i in issues)
     return ValidatorReport(
@@ -285,11 +311,9 @@ def validate_variable_types(file_paths: list[str], repo_root: Path) -> Validator
         except Exception:
             continue
 
-        for var_name, var_body in parsed.get("variable", {}).items():
-            if isinstance(var_body, list):
-                var_body = var_body[0] if var_body else {}
+        for var_name, var_body in _iter_labelled_blocks(parsed, "variable"):
             line_num = _find_line(content, "variable", var_name)
-            type_val = var_body.get("type")
+            type_val = var_body.get("type") if isinstance(var_body, dict) else None
 
             if type_val is None:
                 issues.append(ValidationIssue(

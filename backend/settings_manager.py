@@ -123,6 +123,7 @@ def get_all_settings() -> dict:
             "embedding_model": ts.get("llm", {}).get("embedding_model", "nomic-embed-text"),
             "temperature":     ts.get("llm", {}).get("temperature", 0.0),
             "max_tokens":      ts.get("llm", {}).get("max_tokens", 2048),
+            "disable_thinking": ts.get("llm", {}).get("disable_thinking", True),
         },
         "server": {
             "host":   ts.get("server", {}).get("host", "127.0.0.1"),
@@ -147,7 +148,7 @@ def get_all_settings() -> dict:
 
 def update_llm_settings(updates: dict) -> dict:
     """Persist LLM settings back to terrascope.config.yaml."""
-    allowed = {"provider", "base_url", "model", "embedding_model", "temperature", "max_tokens"}
+    allowed = {"provider", "base_url", "model", "embedding_model", "temperature", "max_tokens", "disable_thinking"}
     data = _read_yaml()
     llm_cfg = data.setdefault("terrascope", {}).setdefault("llm", {})
     for k, v in updates.items():

@@ -1634,6 +1634,39 @@ function DocsPanel({ repos, health }) {
     finally { setPublishing(false); }
   };
 
+  // Download the previewed documents as standalone .html files — the offline
+  // alternative to Confluence publishing. Uses the preview already in state,
+  // so no second pipeline run (and no Confluence credentials) is needed.
+  const handleDownload = () => {
+    if (!preview) return;
+    const okPages = (preview.pages || []).filter(p => p.dry_run_html);
+    if (okPages.length === 0) { setError("Nothing to download — generate a preview first"); return; }
+    const product = (productName.trim() || "terrascope").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    okPages.forEach(p => {
+      const title = `${productName.trim()} — ${p.doc_type}`;
+      const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${title}</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 900px;
+         margin: 40px auto; padding: 0 20px; color: #1f2328; line-height: 1.6; }
+  h1, h2, h3 { border-bottom: 1px solid #d0d7de; padding-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #d0d7de; padding: 6px 10px; text-align: left; font-size: 14px; }
+  th { background: #f6f8fa; }
+</style></head><body>
+${p.dry_run_html}
+</body></html>`;
+      const blob = new Blob([html], { type: "text/html" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${product}_${p.doc_type.toLowerCase().replace(/[^a-z0-9]+/g, "_")}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+    });
+  };
+
   const inputStyle = {
     background:"#161B22", border:"1px solid #21262D", borderRadius:5,
     color:"#E6EDF3", fontSize:11.5, padding:"6px 10px", fontFamily:"inherit", width:"100%",
@@ -1723,6 +1756,18 @@ function DocsPanel({ repos, health }) {
               fontSize:12, fontWeight:600, padding:"9px 0", cursor: previewing ? "default" : "pointer",
               fontFamily:"inherit", marginTop:6 }}>
             {previewing ? "Generating preview…" : "① Generate Preview (local)"}
+          </button>
+
+          {/* Download — offline alternative to publishing; enabled after preview */}
+          <button onClick={handleDownload} disabled={!preview}
+            title="Save each previewed document as a standalone .html file"
+            style={{ width:"100%", marginTop:8,
+              background: !preview ? "#0D1117" : "#D2A8FF22",
+              border:`1px solid ${!preview ? "#21262D" : "#D2A8FF66"}`,
+              borderRadius:6, color: !preview ? "#484F58" : "#D2A8FF",
+              fontSize:12, fontWeight:600, padding:"9px 0",
+              cursor: !preview ? "default" : "pointer", fontFamily:"inherit" }}>
+            ⬇ Download Documents (.html)
           </button>
 
           {/* Phase 2: Publish — enabled only after a successful preview */}
@@ -2523,6 +2568,14 @@ function SettingsPanel() {
                 onChange={e => setLlm(p => ({...p, max_tokens: parseInt(e.target.value)}))} />
             </SettingsField>
           </div>
+          <SettingsField label="Disable Thinking Mode"
+            hint="For thinking models (qwen3 family, deepseek-r1): skip the reasoning trace. All TerraScope prompts are grounded, so thinking adds minutes of latency — and can eat the whole token budget, returning empty answers.">
+            <label style={{ display:"flex", alignItems:"center", gap:8, fontSize:11.5, color:"#E6EDF3", cursor:"pointer" }}>
+              <input type="checkbox" checked={llm.disable_thinking !== false}
+                onChange={e => setLlm(p => ({...p, disable_thinking: e.target.checked}))} />
+              Skip reasoning traces (recommended for grounded generation)
+            </label>
+          </SettingsField>
           <button style={btnS()} disabled={saving.llm}
             onClick={() => save("llm", "llm", llm)}>
             {saving.llm ? "Saving…" : "Save LLM Settings"}

@@ -21,6 +21,7 @@ from git import Repo, GitCommandError
 from backend.config import get_config
 from backend.agent.tools.git_tools import get_file_at_tag, list_tf_files_at_tag, _get_repo
 from backend.agent.tools.hcl_tools import parse_hcl_content, get_provider_requirements
+from backend.llm_options import llm_extra_body, nothink_messages
 from backend.ga_workflow.ga_models import (
     GAChangeSet, GAChange, ChangeType,
     CodeChange, CodeChangeSet, BranchResult,
@@ -198,7 +199,8 @@ Return ONLY the complete updated file content as valid HCL. No markdown fences, 
         try:
             resp = await client.chat.completions.create(
                 model=cfg.llm.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=nothink_messages([{"role": "user", "content": prompt}]),
+            extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
                 temperature=0.0,
                 max_tokens=4000,
             )

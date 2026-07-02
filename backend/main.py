@@ -548,6 +548,7 @@ class LLMSettingsUpdate(BaseModel):
     embedding_model: Optional[str]   = None
     temperature:     Optional[float] = None
     max_tokens:      Optional[int]   = None
+    disable_thinking: Optional[bool] = None
 
 
 class ServerSettingsUpdate(BaseModel):

@@ -26,6 +26,11 @@ class LLMConfig(BaseModel):
     temperature: float = 0.0
     max_tokens: int = 2048
     context_window: int = 8192
+    # Every LLM call in this app is grounded (schema/docs/code injected into
+    # the prompt), so reasoning traces from thinking-capable models (qwen3
+    # family, deepseek-r1, ...) add minutes of latency without adding grounding.
+    # True = ask Ollama to skip the thinking phase.
+    disable_thinking: bool = True
 
 
 class GroundingConfig(BaseModel):

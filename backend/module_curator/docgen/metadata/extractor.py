@@ -37,6 +37,7 @@ class TFModuleMetadata(BaseModel):
     provider:          str = "google"
     description:       str = ""
     resource_types:    list[str] = []
+    data_source_types: list[str] = []
     required_inputs:   dict[str, InputVariable] = {}
     optional_inputs:   dict[str, InputVariable] = {}
     outputs:           dict[str, OutputValue]   = {}
@@ -59,6 +60,42 @@ class TFModuleMetadata(BaseModel):
     apis_required:           list[str] = []
     common_roles:            list[str] = []
     official_doc_urls:       list[str] = []
+
+    @property
+    def terraform_resource_refs(self) -> list[str]:
+        """Per-resource/data-source reference links into the Terraform registry
+        and the provider's GitHub source docs — so generated documents cite the
+        authoritative Terraform documentation for every resource they mention.
+
+        Computed (not stored) so it always reflects the current resource lists.
+        Only the three hashicorp providers this app supports are linked; other
+        prefixes are skipped rather than guessed (a wrong link is worse than none).
+        """
+        refs: list[str] = []
+        provider = (self.provider or "google").strip().lower()
+        if provider not in ("google", "aws", "azurerm"):
+            return refs
+        registry_base = f"https://registry.terraform.io/providers/hashicorp/{provider}/latest/docs"
+        github_base = f"https://github.com/hashicorp/terraform-provider-{provider}/blob/main/website/docs"
+        prefix = f"{provider}_"
+
+        for rtype in self.resource_types:
+            if not rtype.startswith(prefix):
+                continue
+            short = rtype[len(prefix):]
+            refs.append(
+                f"{rtype} — {registry_base}/resources/{short} · "
+                f"source: {github_base}/r/{short}.html.markdown"
+            )
+        for dtype in self.data_source_types:
+            if not dtype.startswith(prefix):
+                continue
+            short = dtype[len(prefix):]
+            refs.append(
+                f"data.{dtype} — {registry_base}/data-sources/{short} · "
+                f"source: {github_base}/d/{short}.html.markdown"
+            )
+        return refs
 
     def merge_docs_bundle(self, bundle) -> None:
         """Fold a GCPDocsBundle's research fields into this metadata."""
@@ -123,48 +160,93 @@ def extract_from_files(tf_files: dict[str, str], service_name: str = "") -> TFMo
 
 # ── Per-file handlers ─────────────────────────────────────────────────────────
 
+def _unquote(label: str) -> str:
+    """python-hcl2's string-mode parse leaves a block label's surrounding
+    double quotes attached to the key (variable "project_id" -> the dict key
+    is literally '"project_id"'), so every label must be stripped before use."""
+    return str(label).strip().strip('"')
+
+
+def _clean_value(v) -> str:
+    """Strip the surrounding quotes hcl2 keeps on string literal VALUES."""
+    s = str(v) if v is not None else ""
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1]
+    return s
+
+
 def _apply_variables(parsed: dict, meta: TFModuleMetadata) -> None:
     for var_block in parsed.get("variable", []):
+        if not isinstance(var_block, dict):
+            continue
         for var_name, cfg in var_block.items():
+            if var_name == "__is_block__" or not isinstance(cfg, dict):
+                continue
             has_default = "default" in cfg
             iv = InputVariable(
-                type=str(cfg.get("type", "any")),
-                description=str(cfg.get("description", "")),
+                type=_clean_value(cfg.get("type", "any")),
+                description=_clean_value(cfg.get("description", "")),
                 default=str(cfg["default"]) if has_default else None,
                 required=not has_default,
             )
             if iv.required:
-                meta.required_inputs[var_name] = iv
+                meta.required_inputs[_unquote(var_name)] = iv
             else:
-                meta.optional_inputs[var_name] = iv
+                meta.optional_inputs[_unquote(var_name)] = iv
 
 
 def _apply_outputs(parsed: dict, meta: TFModuleMetadata) -> None:
     for out_block in parsed.get("output", []):
+        if not isinstance(out_block, dict):
+            continue
         for out_name, cfg in out_block.items():
-            meta.outputs[out_name] = OutputValue(
-                description=str(cfg.get("description", "")),
+            if out_name == "__is_block__" or not isinstance(cfg, dict):
+                continue
+            meta.outputs[_unquote(out_name)] = OutputValue(
+                description=_clean_value(cfg.get("description", "")),
                 value=str(cfg.get("value", "")),
             )
 
 
 def _apply_main(parsed: dict, meta: TFModuleMetadata) -> None:
     for resource_block in parsed.get("resource", []):
+        if not isinstance(resource_block, dict):
+            continue
         for rtype in resource_block:
+            if rtype == "__is_block__":
+                continue
+            rtype = _unquote(rtype)
             if rtype not in meta.resource_types:
                 meta.resource_types.append(rtype)
+    for data_block in parsed.get("data", []):
+        if not isinstance(data_block, dict):
+            continue
+        for dtype in data_block:
+            if dtype == "__is_block__":
+                continue
+            dtype = _unquote(dtype)
+            if dtype not in meta.data_source_types:
+                meta.data_source_types.append(dtype)
     for module_block in parsed.get("module", []):
+        if not isinstance(module_block, dict):
+            continue
         for mod_name in module_block:
+            if mod_name == "__is_block__":
+                continue
+            mod_name = _unquote(mod_name)
             if mod_name not in meta.module_calls:
                 meta.module_calls.append(mod_name)
 
 
 def _apply_versions(parsed: dict, meta: TFModuleMetadata) -> None:
     for tf_block in parsed.get("terraform", []):
+        if not isinstance(tf_block, dict):
+            continue
         # required_version
         req_tf = tf_block.get("required_version", "")
         if req_tf and not meta.terraform_version:
-            meta.terraform_version = str(req_tf)
+            meta.terraform_version = _clean_value(req_tf)
         # required_providers
         req_provs = tf_block.get("required_providers", [])
         if isinstance(req_provs, list):
@@ -172,10 +254,11 @@ def _apply_versions(parsed: dict, meta: TFModuleMetadata) -> None:
                 if not isinstance(rp, dict):
                     continue
                 for pname, pcfg in rp.items():
+                    pname = _unquote(pname)
                     v = pcfg.get("version", "") if isinstance(pcfg, dict) else ""
                     if pname in ("google", "aws", "azurerm") and not meta.provider_version:
                         meta.provider = pname
-                        meta.provider_version = str(v)
+                        meta.provider_version = _clean_value(v)
 
 
 _FILE_HANDLERS = {
