@@ -2,7 +2,7 @@ terrascope:
   llm:
     provider: ollama
     base_url: http://localhost:11434
-    model: qwen2.5-coder:7b
+    model: qwen3.5:9b
     embedding_model: nomic-embed-text
     temperature: 0.0
     max_tokens: 2048
@@ -10,7 +10,7 @@ terrascope:
   grounding:
     mode: strict
     require_source_citation: true
-    min_confidence_threshold: 0.7
+    min_confidence_threshold: 0.5
     max_retrieval_chunks: 8
     chunk_overlap_tokens: 50
   vector_store:
@@ -19,14 +19,11 @@ terrascope:
   server:
     host: 127.0.0.1
     port: 8000
-    reload: true
+    reload: false
   ui:
     port: 5173
     theme: dark
   policy:
-    # Org-accepted checkov suppressions (Priority 5 gate). Each entry is a
-    # checkov check_id, e.g. CKV_GCP_62. Empty by default -- nothing is
-    # suppressed until a curator explicitly adds an org-approved exception.
     skip_checks: []
   scenario_generator:
     terraform_bin: terraform
