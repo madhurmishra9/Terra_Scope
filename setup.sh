@@ -110,7 +110,7 @@ else
     # Read model + embedding_model from the YAML without needing a YAML lib.
     MODEL="$(grep -E '^\s*model:' terrascope.config.yaml | head -1 | sed -E 's/.*model:\s*//; s/["\x27]//g' | tr -d '[:space:]')"
     EMB="$(grep -E '^\s*embedding_model:' terrascope.config.yaml | head -1 | sed -E 's/.*embedding_model:\s*//; s/["\x27]//g' | tr -d '[:space:]')"
-    MODEL="${MODEL:-qwen2.5-coder:7b}"
+    MODEL="${MODEL:-qwen3.5:9b}"
     EMB="${EMB:-nomic-embed-text}"
     for m in "$MODEL" "$EMB"; do
       if ollama list 2>/dev/null | grep -q "${m%%:*}"; then
