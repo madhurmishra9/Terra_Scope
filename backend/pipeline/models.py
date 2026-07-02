@@ -4,8 +4,18 @@ Every Agent in the pipeline declares output_type=<one of these models>.
 """
 from __future__ import annotations
 
+from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
+
+
+class CurationOutcome(str, Enum):
+    """Escalation as a first-class outcome (Priority 3): distinguishes a
+    module that is genuinely ready for curator approval from one that only
+    *looks* shippable because it survived the repair loop's round cap."""
+    CANDIDATE_READY = "candidate_ready"   # all gates passed -> curator may approve
+    ESCALATED = "escalated"               # repair budget exhausted -> human required
+    FAILED = "failed"                     # a pass itself errored (existing .error path)
 
 
 class QuestionSet(BaseModel):
@@ -55,4 +65,11 @@ class CurationPipelineOutput(BaseModel):
     )
     error: Optional[str] = Field(
         default=None, description="Set if any stage failed fatally."
+    )
+    outcome: Optional[CurationOutcome] = Field(
+        default=None, description="Escalation-aware result of the pipeline run.",
+    )
+    outstanding_issues: list[str] = Field(
+        default_factory=list,
+        description="Unresolved validator errors when outcome=ESCALATED.",
     )

@@ -30,7 +30,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from backend.module_curator.docgen.ir import DOC_TYPES, DocumentIR
+from backend.module_curator.docgen.ir import DOC_TYPES, DocumentIR, HeadingNode
 from backend.module_curator.docgen.manifest import DocgenManifest
 from backend.module_curator.docgen.metadata.extractor import (
     TFModuleMetadata,
@@ -41,6 +41,12 @@ from backend.module_curator.docgen.template.parser import parse_docx
 from backend.module_curator.docgen.template.fields import FieldMap, bind_fields
 from backend.module_curator.docgen.diagrams.resolver import resolve as resolve_diagram
 from backend.module_curator.docgen.render.storage_format import render as render_xhtml
+from backend.module_curator.docgen.verify import (
+    TemplateSpec,
+    check_content,
+    check_structure,
+    extract_covered_keys,
+)
 
 _MANIFEST_PATH   = Path("data/docgen_manifest.json")
 _DEFAULT_TEMPLATE = Path("templates/example/example.docx")
@@ -69,8 +75,9 @@ class PageResult(BaseModel):
     page_url:     Optional[str] = None
     dry_run_path: Optional[str] = None
     dry_run_html: Optional[str] = None
-    status:       str = "ok"        # "ok" | "error"
+    status:       str = "ok"        # "ok" | "blocked" | "error"
     error:        Optional[str] = None
+    problems:     list[str] = []    # diagram render + structure/content guard findings
 
 
 class DocgenResult(BaseModel):
@@ -201,31 +208,74 @@ def _generate_doc(
         if field_map:
             ir = bind_fields(ir, field_map, meta)
 
-        # Resolve diagram images
+        # Resolve diagram images — Priority 1: diagram truth from real HCL, a
+        # render gate, and a publishable flag the publish step must respect.
         attachment_map: dict[str, str] = {}
         diagram_blobs:  dict[str, tuple[bytes, str]] = {}
+        problems: list[str] = []
+        any_diagram_blocked = False
 
         from backend.module_curator.docgen.ir import DiagramNode
         for node in ir.nodes:
             if isinstance(node, DiagramNode):
-                blob, ext = resolve_diagram(
+                diag = resolve_diagram(
                     doc_type=node.diagram_type,
                     caption=node.caption,
                     product_name=meta.service_name,
                     module_dir=module_dir,
                     assets_dir=assets_dir,
                 )
+                for p in diag.problems:
+                    problems.append(f"{node.diagram_type}: {p}")
+                if not diag.publishable:
+                    any_diagram_blocked = True
+                    continue  # never attach a placeholder/unrendered diagram
                 slug  = node.diagram_type.lower().replace(" ", "_")
-                fname = f"{meta.service_name}_{slug}.{ext}"
+                fname = f"{meta.service_name}_{slug}.{diag.ext}"
                 attachment_map[node.caption] = fname
-                diagram_blobs[fname] = (blob, ext)
+                diagram_blobs[fname] = (diag.image_bytes, diag.ext)
 
         # Render to XHTML
         page_html  = render_xhtml(ir, attachment_map=attachment_map if not req.dry_run else None)
         page_title = f"{meta.service_name.title()} — {doc_type}"
 
+        # Priority 2: post-render verification guards — structure + content.
+        heading_texts = [n.text for n in ir.nodes if isinstance(n, HeadingNode)]
+        template_spec = TemplateSpec.from_headings(heading_texts)
+        srep = check_structure(page_html, template_spec)
+        problems += [f"missing section: {s}" for s in srep.missing_sections]
+        if srep.out_of_order:
+            problems.append("sections out of template order")
+
+        def _norm_key(k: str) -> str:
+            # extract_from_files' hcl2 string-mode parse can leave a block
+            # label's surrounding quotes attached to the key — normalize
+            # before comparing against extract_covered_keys' normalized set.
+            return k.strip().strip('"').strip().lower()
+
+        source_fact_keys = {
+            _norm_key(k) for k in (
+                set(meta.required_inputs.keys())
+                | set(meta.optional_inputs.keys())
+                | set(meta.outputs.keys())
+                | set(meta.resource_types)
+                | set(meta.apis_required)
+            )
+        }
+        if source_fact_keys:
+            crep = check_content(source_fact_keys, extract_covered_keys(page_html))
+            problems += [f"dropped fact: {f}" for f in crep.dropped_facts]
+            problems += [f"invented fact: {f}" for f in crep.invented_facts]
+
+        blocked = any_diagram_blocked or bool(
+            srep.missing_sections or srep.out_of_order
+            or (source_fact_keys and (crep.dropped_facts or crep.invented_facts))
+        )
+
         # ── Dry run ───────────────────────────────────────────────────────────
         if req.dry_run:
+            # Preview may show anything, including a placeholder + its problems —
+            # the curator needs to SEE why a doc would be blocked before publish.
             dry_dir = Path(req.dry_run_dir)
             dry_dir.mkdir(parents=True, exist_ok=True)
             slug     = doc_type.lower().replace(" ", "_")
@@ -236,6 +286,16 @@ def _generate_doc(
                 doc_type=doc_type,
                 dry_run_path=str(out_path),
                 dry_run_html=page_html,
+                problems=problems,
+            )
+
+        # ── Publish gate — never publish a placeholder/unverified doc ───────────
+        if blocked:
+            return PageResult(
+                doc_type=doc_type,
+                status="blocked",
+                error=f"{doc_type}: blocked — {'; '.join(problems)}",
+                problems=problems,
             )
 
         # ── Publish ───────────────────────────────────────────────────────────
@@ -265,7 +325,7 @@ def _generate_doc(
             pass
 
         manifest.set(req.product_name, pages={doc_type: page_id})
-        return PageResult(doc_type=doc_type, page_id=page_id, page_url=page_url)
+        return PageResult(doc_type=doc_type, page_id=page_id, page_url=page_url, problems=problems)
 
     except Exception as exc:
         return PageResult(doc_type=doc_type, status="error", error=str(exc))
@@ -427,6 +487,8 @@ def _cli() -> None:
         if page.status == "ok":
             dest = page.dry_run_path or page.page_id
             print(f"  [ok] {page.doc_type}: {dest}")
+        elif page.status == "blocked":
+            print(f"  [blocked] {page.doc_type}: {page.error}")
         else:
             print(f"  [error] {page.doc_type}: {page.error}")
 

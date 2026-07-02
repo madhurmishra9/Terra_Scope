@@ -2,7 +2,21 @@
 
 > **AI-powered Terraform module curation for GCP, AWS, and Azure.**  
 > Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.  
-> **v2.6** — Schema-grounded generation, deterministic modular layout, and an automatic validate→repair loop for more accurate modules.
+> **v2.7** — Verified-diagram docgen, escalation as a first-class outcome, a bounded documentation crawler, and policy/behavioral gates (checkov + `terraform test`).
+
+---
+
+## What's New in v2.7
+
+| Feature | Description |
+|---------|-------------|
+| **📊 Diagram engine replacement** | Architecture diagrams are now parsed from the module's real HCL (`hcl_graph.py`) into Mermaid source, rendered deterministically via Kroki/mmdc, and carry a `publishable` flag — Confluence publish is **blocked** if the diagram didn't render, never silently swapped for a placeholder. Curated modules also get the Mermaid diagram auto-embedded in their README (idempotent, GitHub-native) |
+| **✅ Doc verification guards** | Every generated document is checked post-render for structure conformance (every template section present, in order) and content preservation (no dropped or invented resource/input/output/API facts) before it's allowed to publish |
+| **⚠️ Escalation as a first-class outcome** | The repair loop now returns a typed `CurationOutcome` — `candidate_ready`, `escalated`, or `failed` — instead of silently shipping whatever survived the round cap. Escalated output is written to a `-ESCALATED` folder and the UI shows a banner with the outstanding issues instead of a false "success" screen |
+| **🌐 Bounded documentation crawler** | Google/Terraform-registry research now follows sublinks (domain-allowlisted, depth ≤2, content-hash deduped, disk-cached) instead of fetching one fixed page — broader grounding material without an unbounded crawl |
+| **🛡️ Policy-as-code gate (checkov)** | A new validator layer runs checkov after `validate`/`tflint` pass, with org-approved suppressions configurable via `terrascope.config.yaml`'s `policy.skip_checks` |
+| **🧪 `terraform test` gate** | Curated modules now include a deterministically generated `tests/defaults.tftest.hcl` smoke test (mocked provider, `command = plan`, output assertions), executed as the final validation layer |
+| **🧹 Proxy-safety hygiene** | New `backend/http_clients.py` (`local_client()` / `external_client()`) makes proxy trust explicit per destination — fixes a real bug where Ollama calls weren't proxy-bypassed like the rest of the local-LLM traffic |
 
 ---
 
@@ -287,6 +301,8 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 | Ollama | Latest | [ollama.com](https://ollama.com) |
 | Free disk | ~5 GB | Models + ChromaDB index |
 | RAM | 8 GB min | 16 GB recommended |
+| Terraform, tflint, checkov *(optional)* | Latest | Enable the validate/tflint/checkov/`terraform test` gates. All degrade gracefully — the pipeline runs without them, just with fewer checks |
+| Kroki or mermaid-cli *(optional)* | Latest | Enable deterministic diagram rendering (`docker run -d -p 8000:8000 yuzutech/kroki`, or `npm i -g @mermaid-js/mermaid-cli`). Without either, diagrams render as a preview-only placeholder and publish is blocked |
 
 ### Windows
 - Git for Windows from [git-scm.com](https://git-scm.com/download/win)
@@ -1020,8 +1036,30 @@ Q&A + registry docs
 | **Modular layout** | `backend/module_curator/hcl_splitter.py` | Brace-depth-aware scanner (tolerant of strings, heredocs, comments) that routes each block to its canonical file, then runs `terraform fmt`. Non-`.tf` files (README, examples, tfvars) pass through untouched |
 | **Repair loop** | `backend/module_curator/repair.py` | Feeds the exact validator errors — and only the offending files — back to the model, applies the fix, re-splits, re-fmts, and re-validates until clean or the round cap is hit |
 | **tflint (Layer 5)** | `backend/module_curator/validator.py` + `.tflint.hcl` | Adds deprecation/enum/provider-rule checks on top of the existing HCL-syntax, required-attribute, naming, and `terraform validate` layers |
+| **checkov policy gate (Layer 6)** | `backend/module_curator/validator.py` | Runs after `validate`/`tflint` pass (policy findings on invalid HCL are noise); org-approved suppressions via `terrascope.config.yaml`'s `policy.skip_checks`. Findings are `severity="error"`, so the existing repair loop picks them up automatically |
+| **`terraform test` gate (Layer 7)** | `backend/module_curator/validator.py` | A deterministically generated `tests/defaults.tftest.hcl` (mocked provider, `command = plan`, output assertions) is executed as the final layer — behavioral correctness via native Terraform tests, no credentials required |
+| **Escalation outcome** | `backend/pipeline/models.py`, `backend/module_curator/code_generator.py` | If the repair loop exhausts its round cap without passing, the result is `CurationOutcome.ESCALATED` (not silently shipped) — output goes to a `<slug>-ESCALATED/` folder and the UI shows an amber banner with the outstanding issues instead of a success screen |
 
-> All stages degrade gracefully: if the schema is unavailable, `terraform`/`tflint` are not installed, or a repair pass produces nothing usable, the pipeline falls back to the previous behaviour rather than failing the generation.
+> All stages degrade gracefully: if the schema, `terraform`, `tflint`, or `checkov` are unavailable, or a repair pass produces nothing usable, the pipeline falls back to the previous behaviour rather than failing the generation.
+
+### 10.6 Verified Diagrams & Doc Guards *(v2.7)*
+
+Documentation generation (§11) now shares the same "verified, not just generated" philosophy as code generation:
+
+| Stage | File | What it does |
+|-------|------|--------------|
+| **Diagram-as-code** | `backend/module_curator/docgen/diagrams/hcl_graph.py` | Parses the module's actual `.tf` resources (and cross-resource references) into a graph — diagram truth comes from real HCL, never from the model's imagination |
+| **Deterministic render + render gate** | `backend/module_curator/docgen/diagrams/mermaid_render.py` | Renders Mermaid source via Kroki (self-hosted, `docker run -d -p 8000:8000 yuzutech/kroki`) or `mmdc`. A failed render raises `DiagramRenderError` — an unrenderable diagram is never silently swapped for a placeholder |
+| **Publish gate** | `backend/module_curator/docgen/diagrams/resolver.py` + `docgen/pipeline.py` | Every resolved diagram carries a `publishable` flag; Confluence publish is **blocked** (not attempted) whenever `publishable=False`, with the reason surfaced in the preview/error output |
+| **README embed** | `backend/module_curator/docgen/diagrams/readme_embed.py` | Curated modules get the Mermaid diagram auto-embedded in `README.md` between idempotent HTML-comment markers — GitHub renders it natively, no image asset committed |
+| **Structure + content guards** | `backend/module_curator/docgen/verify.py` | Post-render checks: every template section present (structure), and no resource/input/output/API fact silently dropped or invented (content) — both must pass before publish |
+| **Bounded crawler** | `backend/module_curator/docgen/crawler.py` | Research fetching now follows sublinks (domain allowlist, max depth 2, content-hash dedup, on-disk cache) instead of four fixed URLs |
+
+Manual, on-demand image rendering (for Confluence/PDF targets that don't render Mermaid) stays a deliberate CLI step:
+
+```bash
+python -m backend.tools.render_diagrams README.md --from-readme -d assets --backend kroki --kroki-url http://localhost:8000
+```
 
 ---
 

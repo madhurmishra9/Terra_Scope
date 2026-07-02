@@ -25,16 +25,27 @@ Proxy handling — two directions, deliberately different:
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 
 from backend.config import get_config
+from backend.http_clients import external_client, local_client
+from backend.module_curator.docgen.crawler import BoundedCrawler, CrawlConfig, Page
 from backend.registry_fetcher.registry_api import (
     fetch_service_docs,
     is_network_available,
 )
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_CRAWL_CACHE_DIR = _PROJECT_ROOT / "data" / "docgen_cache"
+_CRAWL_ALLOWLIST = {"cloud.google.com", "registry.terraform.io", "developer.hashicorp.com"}
+_CRAWL_MAX_DEPTH = 2
+_CRAWL_MAX_PAGES = 12
 
 
 # ── Product slug map (GCP service name → cloud.google.com docs path) ───────────
@@ -149,18 +160,20 @@ async def fetch_gcp_docs(
     # 1. Config metadata — offline, always available
     _load_config_metadata(product_name, bundle)
 
-    # 2. Deep fetch of official pages + Terraform registry
+    # 2. Deep fetch of official pages (bounded crawl, Priority 4) + Terraform registry
     raw_parts: list[str] = []
     if is_network_available():
-        for label, url in _research_urls(product_name):
-            text = await _fetch_page(url)
+        seeds = [url for _, url in _research_urls(product_name)]
+        pages = await _bounded_crawl(seeds)
+        for page in pages:
+            text = _html_to_text(page.html)
             if text:
-                raw_parts.append(f"===== SOURCE: {label} ({url}) =====\n{text}")
-                bundle.official_doc_urls.append(url)
-                bundle.sources_used.append(label)
-                print(f"[docgen-research] fetched {label}: {len(text)} chars")
-            else:
-                print(f"[docgen-research] no content from {label}")
+                raw_parts.append(f"===== SOURCE: {page.url} =====\n{text}")
+                bundle.official_doc_urls.append(page.url)
+                bundle.sources_used.append(page.url)
+                print(f"[docgen-research] fetched {page.url} (depth={page.depth}): {len(text)} chars")
+        if not pages:
+            print(f"[docgen-research] bounded crawl returned no pages for {product_name}")
 
         try:
             tf_docs = await fetch_service_docs(provider, product_name)
@@ -233,16 +246,54 @@ def _research_urls(product_name: str) -> list[tuple[str, str]]:
     ]
 
 
-async def _fetch_page(url: str) -> str:
-    """Fetch one page → cleaned text (trust_env default ON for corporate proxy)."""
+def _cache_path(url: str) -> Path:
+    key = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return _CRAWL_CACHE_DIR / f"{key}.html"
+
+
+def _fetch_sync_cached(url: str) -> str | None:
+    """Injected into BoundedCrawler: raw HTML, or None on failure.
+
+    Disk-cached by URL hash so a re-run never re-fetches a page it already
+    has (Priority 4: 'cache pages on disk keyed by content hash'). Proxy ON
+    here (trust_env default True) — cloud.google.com / registry.terraform.io
+    legitimately need the corporate egress proxy; this is the opposite of
+    the local Ollama client (see backend/http_clients.py).
+    """
+    cache_file = _cache_path(url)
+    if cache_file.is_file():
+        try:
+            return cache_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            pass
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            r = await client.get(url)
-            if r.status_code != 200:
-                return ""
-        return _html_to_text(r.text)
+        with external_client(is_async=False, timeout=15.0, follow_redirects=True) as client:
+            r = client.get(url)
+        if r.status_code != 200:
+            return None
+        html = r.text
     except Exception:
-        return ""
+        return None
+    try:
+        _CRAWL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(html, encoding="utf-8")
+    except OSError:
+        pass
+    return html
+
+
+async def _bounded_crawl(seeds: list[str]) -> list[Page]:
+    """Run the domain-allowlisted, depth-bounded crawl off the event loop
+    (BoundedCrawler.crawl is a blocking, synchronous walk)."""
+    crawler = BoundedCrawler(
+        _fetch_sync_cached,
+        CrawlConfig(allowlist=set(_CRAWL_ALLOWLIST), max_depth=_CRAWL_MAX_DEPTH, max_pages=_CRAWL_MAX_PAGES),
+    )
+    try:
+        return await asyncio.to_thread(crawler.crawl, seeds)
+    except Exception as e:
+        print(f"[docgen-research] bounded crawl failed: {e}")
+        return []
 
 
 def _html_to_text(html: str) -> str:
@@ -272,10 +323,7 @@ def _make_llm_client():
         base_url=base_url,
         api_key="ollama",
         max_retries=0,  # retrying a slow local model just resends the same big prompt
-        http_client=httpx.AsyncClient(
-            trust_env=False,                     # never proxy local Ollama traffic
-            timeout=httpx.Timeout(300.0),
-        ),
+        http_client=local_client(timeout=httpx.Timeout(300.0)),
     ), cfg
 
 

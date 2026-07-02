@@ -42,6 +42,7 @@ output/
 *.log
 backend_test.log
 backend_err.log
+backend_log.txt
 
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store

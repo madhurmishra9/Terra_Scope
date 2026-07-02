@@ -24,6 +24,8 @@ from typing import Iterable, Optional
 
 import hcl2
 
+from backend.config import get_config
+
 _PROJECT_TFLINT_CFG = Path(__file__).resolve().parent.parent.parent / ".tflint.hcl"
 
 from backend.registry_fetcher.schema_fetcher import (
@@ -570,6 +572,131 @@ async def _tflint_validate(files: dict[str, str]) -> list[CurationValidationIssu
     return await asyncio.to_thread(_tflint_validate_sync, files)
 
 
+# ── Layer 6: checkov (policy-as-code — security + org compliance) ─────────────
+
+def _checkov_available() -> bool:
+    try:
+        r = subprocess.run(["checkov", "--version"], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _checkov_validate_sync(
+    files: dict[str, str], skip_checks: list[str]
+) -> list[CurationValidationIssue]:
+    """Run checkov over the module. For an org curation product, security
+    policy is arguably the most important gate — findings come back with
+    severity="error" so the existing repair loop picks them up with zero
+    changes (the repair prompt now carries policy findings too)."""
+    issues: list[CurationValidationIssue] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        for fname, content in files.items():
+            if not fname.endswith(".tf"):
+                continue
+            fpath = tmp / fname
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content, encoding="utf-8")
+
+        cmd = ["checkov", "-d", ".", "-o", "json", "--compact"]
+        if skip_checks:
+            cmd += ["--skip-check", ",".join(skip_checks)]
+        try:
+            proc = subprocess.run(cmd, cwd=tmpdir, capture_output=True, text=True, timeout=300)
+        except Exception as exc:
+            print(f"[validator] checkov execution failed: {exc}")
+            return issues
+
+        try:
+            payload = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            return issues
+        # checkov -o json returns either a single dict or a list of dicts
+        # (one per "check type" — terraform, secrets, ...) depending on version.
+        payloads = payload if isinstance(payload, list) else [payload]
+
+        for p in payloads:
+            failed = (p.get("results", {}) or {}).get("failed_checks", []) or []
+            for c in failed:
+                issues.append(CurationValidationIssue(
+                    severity="error",         # org policy → hard gate
+                    rule=c.get("check_id", "checkov"),
+                    message=c.get("check_name", ""),
+                    file=Path(c.get("file_path", "main.tf")).name,
+                    line=(c.get("file_line_range") or [None])[0],
+                    suggestion=c.get("guideline") or "",
+                ))
+    return issues
+
+
+async def _checkov_validate(
+    files: dict[str, str], skip_checks: list[str]
+) -> list[CurationValidationIssue]:
+    return await asyncio.to_thread(_checkov_validate_sync, files, skip_checks)
+
+
+# ── Layer 7: terraform test (behavioral correctness via native tests) ─────────
+
+def _tf_test_files_present(files: dict[str, str]) -> bool:
+    return any(f.endswith(".tftest.hcl") for f in files)
+
+
+def _terraform_test_sync(files: dict[str, str]) -> list[CurationValidationIssue]:
+    """Run `terraform test` over any *.tftest.hcl files the module carries.
+    Start with command=plan + mocked providers — fast, no credentials. A
+    sandbox-project apply tier is a later, opt-in gate."""
+    issues: list[CurationValidationIssue] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        for fname, content in files.items():
+            fpath = tmp / fname
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content, encoding="utf-8")
+
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-no-color"],
+            cwd=tmpdir, capture_output=True, text=True, timeout=120,
+        )
+        if init.returncode != 0:
+            return [CurationValidationIssue(
+                severity="error", file="", rule="terraform_test_init",
+                message=f"terraform init failed before test run: "
+                        f"{(init.stderr or init.stdout or '').strip()[:400]}",
+            )]
+
+        try:
+            proc = subprocess.run(
+                ["terraform", "test", "-json", "-no-color"],
+                cwd=tmpdir, capture_output=True, text=True, timeout=600,
+            )
+        except Exception as exc:
+            print(f"[validator] terraform test execution failed: {exc}")
+            return issues
+
+        for line in (proc.stdout or "").splitlines():
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if evt.get("type") != "test_run":
+                continue
+            tr = evt.get("test_run", {}) or {}
+            if tr.get("status") == "fail":
+                issues.append(CurationValidationIssue(
+                    severity="error",
+                    file=tr.get("path") or "tests/defaults.tftest.hcl",
+                    rule="terraform-test",
+                    message=f"{tr.get('run', tr.get('run_name', 'run'))}: assertion failed"
+                            + (f" — {evt.get('message')}" if evt.get("message") else ""),
+                ))
+    return issues
+
+
+async def _terraform_test_validate(files: dict[str, str]) -> list[CurationValidationIssue]:
+    return await asyncio.to_thread(_terraform_test_sync, files)
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def validate_curation(
@@ -626,6 +753,36 @@ async def validate_curation(
             all_issues.extend(await _tflint_validate(files))
         except Exception as exc:
             print(f"[validator] tflint validation failed: {exc}")
+
+    # Gate order: fmt -> validate -> schema -> tflint -> checkov -> terraform
+    # test, short-circuiting on the first hard failure. Policy findings on
+    # invalid HCL are noise, and the repair loop targets one clear error
+    # better than a pile of cascading ones.
+    errors_before_policy = sum(1 for i in all_issues if i.severity == "error")
+    clean_so_far = errors_before_policy == 0 and (cli_passed is None or cli_passed)
+
+    print("[validator] Layer 6: checkov (policy-as-code)")
+    if clean_so_far and _checkov_available():
+        try:
+            skip_checks = get_config().policy.skip_checks
+        except Exception:
+            skip_checks = []
+        try:
+            all_issues.extend(await _checkov_validate(files, skip_checks))
+        except Exception as exc:
+            print(f"[validator] checkov validation failed: {exc}")
+    else:
+        print("[validator] Layer 6: skipped (earlier errors or checkov not installed)")
+
+    print("[validator] Layer 7: terraform test")
+    errors_before_test = sum(1 for i in all_issues if i.severity == "error")
+    if errors_before_test == 0 and cli_available and _tf_test_files_present(files):
+        try:
+            all_issues.extend(await _terraform_test_validate(files))
+        except Exception as exc:
+            print(f"[validator] terraform test validation failed: {exc}")
+    else:
+        print("[validator] Layer 7: skipped (earlier errors, no CLI, or no .tftest.hcl files)")
 
     error_count = sum(1 for i in all_issues if i.severity == "error")
     warning_count = sum(1 for i in all_issues if i.severity == "warning")

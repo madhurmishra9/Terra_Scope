@@ -60,6 +60,11 @@ class UIConfig(BaseModel):
     theme: str = "dark"
 
 
+class PolicyConfig(BaseModel):
+    """Org-accepted policy suppressions for the checkov gate (Priority 5)."""
+    skip_checks: list[str] = []
+
+
 class GCPProductMeta(BaseModel):
     apis: list[str] = []
     common_roles: list[str] = []
@@ -99,6 +104,7 @@ class TerrascopeInner(BaseModel):
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
 
 
 class TerrascopeConfig(BaseModel):
@@ -122,6 +128,10 @@ class TerrascopeConfig(BaseModel):
     @property
     def server(self) -> ServerConfig:
         return self.terrascope.server
+
+    @property
+    def policy(self) -> PolicyConfig:
+        return self.terrascope.policy
 
     @property
     def enabled_repos(self) -> list[RepoConfig]:
