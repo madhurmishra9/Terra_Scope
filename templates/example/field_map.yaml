@@ -52,6 +52,11 @@ fields:
     format: bullet_list
     fallback: "None"
 
+  terraform_resource_refs_list:
+    source: metadata.terraform_resource_refs
+    format: bullet_list
+    fallback: "No provider resources detected in this module."
+
   # ── Input variables ───────────────────────────────────────────────────────
 
   required_inputs_table:

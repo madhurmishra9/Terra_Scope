@@ -37,6 +37,7 @@ from backend.registry_fetcher.schema_context import (
 )
 from backend.pipeline.models import CurationOutcome
 from backend.http_clients import local_client
+from backend.llm_options import llm_extra_body, nothink_messages
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -385,7 +386,8 @@ async def _call_llm(prompt: str) -> str:
 
     resp = await client.chat.completions.create(
         model=cfg.llm.model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=nothink_messages([{"role": "user", "content": prompt}]),
+            extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
         temperature=0.1,
         max_tokens=max_out,
     )

@@ -23,6 +23,7 @@ import httpx
 from backend.config import get_config, RepoConfig
 from backend.agent.tools.git_tools import get_latest_tag, get_file_at_tag, list_tf_files_at_tag
 from backend.agent.tools.hcl_tools import get_all_resources, get_provider_requirements
+from backend.llm_options import llm_extra_body, nothink_messages
 from backend.ga_workflow.ga_models import (
     GAChange, GARelease, GAChangeSet, ChangeType, BreakingReason, CloudProvider,
     WorkflowRun, WorkflowStage,
@@ -375,7 +376,8 @@ Return ONLY the JSON array, no markdown, no explanation."""
     try:
         resp = await client.chat.completions.create(
             model=cfg.llm.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=nothink_messages([{"role": "user", "content": prompt}]),
+            extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
             temperature=0.0,
             max_tokens=2000,
         )

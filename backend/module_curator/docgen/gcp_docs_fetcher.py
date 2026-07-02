@@ -36,6 +36,7 @@ import httpx
 from backend.config import get_config
 from backend.http_clients import external_client, local_client
 from backend.module_curator.docgen.crawler import BoundedCrawler, CrawlConfig, Page
+from backend.llm_options import llm_extra_body, nothink_messages
 from backend.registry_fetcher.registry_api import (
     fetch_service_docs,
     is_network_available,
@@ -388,7 +389,8 @@ def _make_llm_client():
 async def _ask(client, cfg, prompt: str) -> str:
     resp = await client.chat.completions.create(
         model=cfg.llm.model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=nothink_messages([{"role": "user", "content": prompt}]),
+            extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
         temperature=0.0,
         max_tokens=cfg.llm.max_tokens,
     )

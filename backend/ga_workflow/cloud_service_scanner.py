@@ -27,6 +27,7 @@ import httpx
 from backend.config import get_config
 from backend.agent.tools.git_tools import get_latest_tag
 from backend.agent.tools.hcl_tools import get_all_resources, summarize_module
+from backend.llm_options import llm_extra_body, nothink_messages
 from backend.ga_workflow.ga_models import (
     GCPServiceFeatureModel,
     GCPServiceScanResult,
@@ -369,7 +370,8 @@ If there are no actionable new features, return an empty array []."""
     try:
         resp = await client.chat.completions.create(
             model=cfg.llm.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=nothink_messages([{"role": "user", "content": prompt}]),
+            extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
             temperature=0.0,
             max_tokens=2000,
         )

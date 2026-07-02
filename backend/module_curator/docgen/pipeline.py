@@ -419,6 +419,9 @@ def _minimal_ir(meta: TFModuleMetadata, doc_type: str, has_module: bool = False)
             HeadingNode(level=2, text="Terraform Resources Managed"),
             FieldNode(token="resource_types_list"),
 
+            HeadingNode(level=2, text="Terraform Provider References"),
+            FieldNode(token="terraform_resource_refs_list"),
+
             HeadingNode(level=2, text="Required Inputs"),
             FieldNode(token="required_inputs_table"),
 

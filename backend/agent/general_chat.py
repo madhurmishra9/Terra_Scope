@@ -28,6 +28,7 @@ from backend.agent.tools.search_tools import (
     is_indexed,
 )
 from backend.agent.tools.git_tools import get_latest_tag
+from backend.llm_options import llm_extra_body, nothink_messages
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -191,7 +192,8 @@ async def run_general_chat(req: GeneralChatRequest) -> GeneralChatResponse:
         )
         resp = await client.chat.completions.create(
             model=cfg.llm.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=nothink_messages([{"role": "user", "content": prompt}]),
+            extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
             temperature=0.2,                      # slightly creative for chat
             max_tokens=min(cfg.llm.max_tokens, 1024),   # chat answers stay snappy
         )
