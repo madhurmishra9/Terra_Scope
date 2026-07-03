@@ -102,6 +102,48 @@ _GCP_DOC_SLUGS: dict[str, str] = {
 
 _PAGE_CAP = 15000          # chars of text kept per fetched page
 
+# Deterministic last-resort for "Required Google Cloud APIs": the primary
+# *.googleapis.com endpoint per doc-slug. These are stable, documented
+# identifiers — a curated fact table beats asking a small local model, which
+# can wrongly answer "None" (observed with qwen3.5:9b for Cloud Run).
+_KNOWN_SERVICE_APIS: dict[str, list[str]] = {
+    "bigquery":          ["bigquery.googleapis.com"],
+    "storage":           ["storage.googleapis.com"],
+    "dataflow":          ["dataflow.googleapis.com"],
+    "pubsub":            ["pubsub.googleapis.com"],
+    "sql":               ["sqladmin.googleapis.com"],
+    "spanner":           ["spanner.googleapis.com"],
+    "bigtable":          ["bigtableadmin.googleapis.com"],
+    "dataproc":          ["dataproc.googleapis.com"],
+    "composer":          ["composer.googleapis.com"],
+    "run":               ["run.googleapis.com"],
+    "kubernetes-engine": ["container.googleapis.com"],
+    "functions":         ["cloudfunctions.googleapis.com"],
+    "memorystore":       ["redis.googleapis.com"],
+    "vertex-ai":         ["aiplatform.googleapis.com"],
+    "artifact-registry": ["artifactregistry.googleapis.com"],
+    "secret-manager":    ["secretmanager.googleapis.com"],
+    "alloydb":           ["alloydb.googleapis.com"],
+    "datastream":        ["datastream.googleapis.com"],
+    "firestore":         ["firestore.googleapis.com"],
+    "filestore":         ["file.googleapis.com"],
+    "dns":               ["dns.googleapis.com"],
+    "tasks":             ["cloudtasks.googleapis.com"],
+    "scheduler":         ["cloudscheduler.googleapis.com"],
+    "build":             ["cloudbuild.googleapis.com"],
+    "compute":           ["compute.googleapis.com"],
+    "appengine":         ["appengine.googleapis.com"],
+    "monitoring":        ["monitoring.googleapis.com"],
+    "logging":           ["logging.googleapis.com"],
+    "trace":             ["cloudtrace.googleapis.com"],
+    "cdn":               ["compute.googleapis.com"],
+    "nat":               ["compute.googleapis.com"],
+    "armor":             ["compute.googleapis.com"],
+    "load-balancing":    ["compute.googleapis.com"],
+    "iam":               ["iam.googleapis.com"],
+    "kms":               ["cloudkms.googleapis.com"],
+}
+
 
 @dataclass
 class GCPDocsBundle:
@@ -235,6 +277,12 @@ async def fetch_gcp_docs(
         await _synthesise_sections(bundle, raw_material)
         if not bundle.apis_required or not bundle.common_roles:
             await _extract_apis_and_roles(bundle, raw_material)
+
+    # Deterministic last resort for the primary service API — curated facts,
+    # applied whenever both material extraction and model knowledge came up
+    # empty (small models can wrongly answer "None" for well-known services).
+    if not bundle.apis_required:
+        bundle.apis_required = list(_KNOWN_SERVICE_APIS.get(_slug(product_name).split("/")[0], []))
 
     _fallback_sections(bundle)
     return bundle
