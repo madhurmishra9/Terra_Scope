@@ -59,6 +59,61 @@ def llm_extra_body() -> dict:
     return {"reasoning_effort": "none", "think": False}
 
 
+_runtime_ctx_cache: dict[str, int] = {}
+
+
+def effective_context_tokens() -> int:
+    """The context window the RUNNING Ollama instance actually enforces.
+
+    `terrascope.config.yaml`'s `llm.context_window` states an intent, but
+    Ollama serves the model with its own `num_ctx` (default 4096 unless
+    OLLAMA_CONTEXT_LENGTH / a Modelfile raises it). Prompts longer than the
+    real window don't error — Ollama silently truncates from the FRONT,
+    which cuts away injected grounding material while keeping the trailing
+    instruction. The result reads like 'the material doesn't cover this'.
+
+    Probe GET /api/ps for the loaded model's context_length; fall back to
+    the configured value when the model isn't loaded yet or the probe fails.
+    Cached per (base_url, model) — the runtime window doesn't change while
+    the server is up.
+    """
+    try:
+        cfg = get_config()
+        key = f"{cfg.llm.base_url}|{cfg.llm.model}"
+        if key in _runtime_ctx_cache:
+            return _runtime_ctx_cache[key]
+        import httpx
+        with httpx.Client(trust_env=False, timeout=5.0) as client:
+            r = client.get(cfg.llm.base_url.rstrip("/") + "/api/ps")
+            r.raise_for_status()
+            for m in r.json().get("models", []):
+                if m.get("name") == cfg.llm.model or m.get("model") == cfg.llm.model:
+                    ctx = int(m.get("context_length") or 0)
+                    if ctx > 0:
+                        _runtime_ctx_cache[key] = ctx
+                        return ctx
+        return int(getattr(cfg.llm, "context_window", 8192) or 8192)
+    except Exception:
+        try:
+            return int(get_config().llm.context_window or 8192)
+        except Exception:
+            return 8192
+
+
+def grounding_char_budget(reserved_tokens: int = 1500) -> int:
+    """Chars of grounding material that safely fit the live context window,
+    reserving room for instructions + the answer. ~3.2 chars/token."""
+    return max(3000, int((effective_context_tokens() - reserved_tokens) * 3.2))
+
+
+def pydantic_ai_model_settings() -> dict:
+    """Model settings for pydantic_ai Agents (the Repo Chat / question-engine
+    path) — same thinking-off switches as llm_extra_body(), delivered through
+    pydantic_ai's ModelSettings.extra_body passthrough."""
+    body = llm_extra_body()
+    return {"extra_body": body} if body else {}
+
+
 def nothink_messages(messages: list[dict]) -> list[dict]:
     """Prepend the /no_think soft switch for model families that use it.
     Returns the messages unchanged for other models or when thinking is on."""

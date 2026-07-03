@@ -30,7 +30,10 @@ from backend.agent.tools.hcl_tools import (
     summarize_module,
     parse_hcl_content,
     get_provider_requirements,
+    iter_labelled_blocks,
 )
+from backend.http_clients import local_client
+from backend.llm_options import llm_extra_body
 from backend.ga_workflow.ga_detector import (
     detect_terraform_provider,
     fetch_latest_ga_version,
@@ -140,10 +143,13 @@ def _static_analysis(
                     suggestion="Run `terraform validate` locally to pinpoint the exact line.",
                 ))
 
-    # 1b. Collect declared variable names
+    # 1b. Collect declared variable names (iter_labelled_blocks normalises the
+    # list-of-single-key-dicts shape + quoted labels python-hcl2 produces —
+    # .keys() on the raw parse crashed, and quoted names made every var.X
+    # reference read as "undefined")
     declared_vars: set[str] = set()
     for path, tree in parsed.items():
-        for var_name in tree.get("variable", {}).keys():
+        for var_name, _body in iter_labelled_blocks(tree, "variable"):
             declared_vars.add(var_name)
 
     # 1c. Collect declared local names
@@ -151,7 +157,7 @@ def _static_analysis(
     for path, tree in parsed.items():
         for block in tree.get("locals", []):
             if isinstance(block, dict):
-                declared_locals.update(block.keys())
+                declared_locals.update(k for k in block.keys() if k != "__is_block__")
 
     # 1d. Scan for var.X and local.X references in resource/output/data blocks
     _check_undefined_refs_raw(file_contents, declared_vars, declared_locals, issues)
@@ -217,9 +223,7 @@ def _check_variable_descriptions(
     issues: list[TroubleshootIssue],
 ) -> None:
     for path, tree in parsed.items():
-        for var_name, var_body in tree.get("variable", {}).items():
-            if isinstance(var_body, list):
-                var_body = var_body[0] if var_body else {}
+        for var_name, var_body in iter_labelled_blocks(tree, "variable"):
             if not isinstance(var_body, dict):
                 continue
             if not var_body.get("description"):
@@ -368,7 +372,9 @@ def _check_provider_constraints(
             prov_val = prov_val[0] if prov_val else {}
         if not isinstance(prov_val, dict):
             continue
-        ver_constraint = prov_val.get("version", "")
+        # hcl2 keeps quotes on string literal values — strip so the
+        # constraint checks below actually match
+        ver_constraint = str(prov_val.get("version", "")).strip().strip('"')
         if not ver_constraint:
             issues.append(TroubleshootIssue(
                 severity=IssueSeverity.INFO,
@@ -440,16 +446,19 @@ Return ONLY a valid JSON array. No markdown. No explanation. If no issues found,
 """
 
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            resp = await client.post(
-                f"{cfg.llm.base_url}/api/chat",
-                json={
-                    "model": cfg.llm.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "options": {"temperature": 0.0, "num_predict": 2048},
-                },
-            )
+        payload = {
+            "model": cfg.llm.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.0, "num_predict": 2048},
+        }
+        # Native-API thinking switch (grounded review — reasoning traces just
+        # add latency and can starve num_predict, returning an empty review)
+        if llm_extra_body():
+            payload["think"] = False
+        # local Ollama traffic must never route through the corporate proxy
+        async with local_client(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.post(f"{cfg.llm.base_url}/api/chat", json=payload)
             resp.raise_for_status()
             raw = resp.json()["message"]["content"].strip()
     except Exception:

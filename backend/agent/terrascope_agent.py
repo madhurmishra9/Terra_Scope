@@ -248,27 +248,29 @@ def _make_model() -> OpenAIChatModel:
     try:
         import httpx
         from openai import AsyncOpenAI
+        from backend.http_clients import local_client
         openai_client = AsyncOpenAI(
             base_url=base_url,
             api_key="ollama",
-            http_client=httpx.AsyncClient(
-                trust_env=False,
-                timeout=httpx.Timeout(120.0),   # generous timeout for local LLM
-            ),
+            http_client=local_client(timeout=httpx.Timeout(300.0)),
         )
         return OpenAIChatModel(model_name=cfg.llm.model, openai_client=openai_client)
     except TypeError:
         # Older pydantic_ai doesn't accept openai_client — fall back to provider
-        provider = OpenAIProvider(base_url=base_url, api_key="ollama")
+        from backend.http_clients import local_client
+        provider = OpenAIProvider(base_url=base_url, api_key="ollama",
+                                  http_client=local_client(timeout=300.0))
         return OpenAIChatModel(model_name=cfg.llm.model, provider=provider)
 
 
 def get_agent() -> Agent:
     global _query_agent
     if _query_agent is None:
+        from backend.llm_options import pydantic_ai_model_settings
         _query_agent = Agent(
             model=_make_model(),
             output_type=AgentResponse,
+            model_settings=pydantic_ai_model_settings(),  # no-think: grounded Q&A
             system_prompt=_build_query_system_prompt(strict=True),
         )
     return _query_agent
@@ -281,9 +283,11 @@ def get_generation_agent() -> Agent:
     """
     global _generation_agent
     if _generation_agent is None:
+        from backend.llm_options import pydantic_ai_model_settings
         _generation_agent = Agent(
             model=_make_model(),
             output_type=str,
+            model_settings=pydantic_ai_model_settings(),  # no-think: grounded generation
             system_prompt=_GENERATION_SYSTEM_PROMPT,
         )
     return _generation_agent
@@ -378,7 +382,8 @@ async def run_query(request: QueryRequest) -> AgentResponse:
     # Run agent
     try:
         result = await agent.run(full_prompt)
-        response: AgentResponse = result.data
+        # pydantic_ai 1.x renamed .data -> .output; support both
+        response: AgentResponse = getattr(result, "output", None) or result.data
     except Exception as e:
         return AgentResponse(
             query_type=QueryType.UNKNOWN,
@@ -417,6 +422,13 @@ def _build_query_context(
     top_sources: list[SourceReference],
     issue_match: Optional[IssueSolution],
 ) -> str:
+    from backend.llm_options import grounding_char_budget
+    # Fit the context to the model's ACTUAL runtime window (probed from the
+    # live Ollama instance). Unbounded context here meant a 15-25K-char prompt
+    # into a (typically) 4096-token window: Ollama silently truncates from the
+    # front, and CPU prefill of the oversized prompt takes many minutes.
+    budget = grounding_char_budget(reserved_tokens=1200)
+
     parts = [
         "=== REPOSITORY CONTEXT ===",
         f"Repo: {repo_cfg.name} ({repo_cfg.display_name})",
@@ -424,17 +436,23 @@ def _build_query_context(
         f"Tag being analyzed: {tag}",
         "",
         "=== MODULE SUMMARY (from code analysis) ===",
-        json.dumps(summary, indent=2),
+        # compact JSON — indent=2 tripled the summary's size for no benefit
+        json.dumps(summary, separators=(",", ":"))[: budget // 2],
         "",
     ]
 
     if top_sources:
         parts.append("=== MOST RELEVANT CODE CHUNKS (from semantic search) ===")
+        used = sum(len(p) for p in parts)
         for i, src in enumerate(top_sources, 1):
-            parts.append(
+            chunk = (
                 f"[Source {i}] {src.file_path} lines {src.line_start}-{src.line_end} "
-                f"(relevance: {src.relevance:.2f}):\n{src.snippet}"
+                f"(relevance: {src.relevance:.2f}):\n{src.snippet[:1200]}"
             )
+            if used + len(chunk) > budget:
+                break  # keep the most relevant chunks; drop the tail
+            parts.append(chunk)
+            used += len(chunk)
         parts.append("")
 
     if issue_match:
@@ -445,7 +463,7 @@ def _build_query_context(
             parts.append(f"Terraform fix:\n{issue_match.terraform_fix}")
         parts.append("")
 
-    return "\n".join(parts)
+    return "\n".join(parts)[:budget]
 
 
 # ── Generation pipeline ────────────────────────────────────────────────────────

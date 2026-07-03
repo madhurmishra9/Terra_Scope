@@ -2,7 +2,7 @@
 
 > **AI-powered Terraform module curation for GCP, AWS, and Azure.**  
 > Query any module version in natural language, generate new modules from scratch, curate existing ones, and automate GA upgrades — all running 100% locally with Ollama.  
-> **v2.7.1** — Reliability fixes: indexing no longer gets killed mid-run, GA Workflow no longer 500s, Repo Chat no longer crashes on a partially-indexed tag, and Docgen never fabricates a documentation URL.
+> **v2.8** — Every tab validated end-to-end with a live LLM: thinking-mode disabled across all call sites (fast, non-empty answers), document generation sized to the model's *actual* context window with a labelled general-knowledge tier so no section ships as a placeholder, downloadable documents, per-resource Terraform references, and Troubleshoot's static analysis fixed.
 
 📋 **Full version history:** [CHANGELOG.md](CHANGELOG.md)
 
@@ -1726,6 +1726,18 @@ If a one-word response takes more than a few seconds, the model is running CPU-o
 - Set up GPU acceleration for Ollama if your hardware supports it (`nvidia-smi` should list a GPU; if it's not found, Ollama falls back to CPU).
 
 Also check `OLLAMA_NUM_PARALLEL` — Ollama serializes every request (indexing embeddings, chat, GA analysis, docgen synthesis) when it's `1`, so concurrent operations queue behind each other rather than running in parallel.
+
+### Generated documents feel thin / sections say "verify against official documentation"
+Ollama serves models with its own context window (`num_ctx`, commonly **4096** tokens) regardless of what `terrascope.config.yaml` says — check the real value with:
+```bash
+curl -s http://localhost:11434/api/ps   # look for "context_length"
+```
+TerraScope probes this at runtime and sizes the grounding material it injects to what actually fits — so with a 4096-token window, only ~8 KB of crawled documentation reaches the model per section, and more sections fall back to the labelled general-knowledge tier. To give the model more official material to work from, raise the window and restart Ollama:
+```bash
+# Windows: set as a system environment variable, then restart the Ollama service
+OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+```
+More context = slower prompt processing on CPU, but substantially richer grounded sections.
 
 ### Ollama offline
 ```
