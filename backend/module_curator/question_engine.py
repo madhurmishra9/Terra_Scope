@@ -31,6 +31,8 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from backend.config import get_config
+from backend.http_clients import local_client
+from backend.llm_options import pydantic_ai_model_settings
 from backend.module_curator.models import CurationMode, CurationSession
 from backend.pipeline.models import QuestionSet
 
@@ -48,6 +50,8 @@ def _make_model() -> OpenAIChatModel:
         provider=OpenAIProvider(
             base_url=cfg.llm.base_url.rstrip("/") + "/v1",
             api_key="ollama",
+            # never route local Ollama traffic through the corporate proxy
+            http_client=local_client(timeout=300.0),
         ),
     )
 
@@ -58,6 +62,7 @@ def _get_question_agent() -> Agent:
         _question_agent = Agent(
             model=_make_model(),
             output_type=QuestionSet,
+            model_settings=pydantic_ai_model_settings(),  # no-think for grounded Q&A
             system_prompt=(
                 "You are a senior Terraform infrastructure engineer. "
                 "Your job is to produce a precise JSON list of clarifying questions "
@@ -75,6 +80,7 @@ def _get_followup_agent() -> Agent:
         _followup_agent = Agent(
             model=_make_model(),
             output_type=QuestionSet,
+            model_settings=pydantic_ai_model_settings(),  # no-think for grounded Q&A
             system_prompt=(
                 "You are a senior Terraform infrastructure engineer reviewing Q&A pairs. "
                 "Identify gaps, ambiguities, and missing required inputs. "

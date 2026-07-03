@@ -4,6 +4,34 @@ All notable changes to TerraScope are documented here, newest first. See [README
 
 ---
 
+## v2.8
+
+Full-feature validation pass with a live LLM — every tab exercised end-to-end, the remaining LLM call sites fixed, and document generation made genuinely detailed.
+
+| Change | Description |
+|---|---|
+| **📏 Runtime context-window probe** | Ollama serves models with its own `num_ctx` (often 4096) regardless of `terrascope.config.yaml` — and prompts that exceed it are silently truncated from the FRONT, cutting away injected grounding material while keeping the trailing instruction. Docgen's 24 000-char grounding never fit; the model literally couldn't see most of the crawled docs. New `effective_context_tokens()` probes the live instance (`/api/ps`) and sizes grounding material to what actually fits |
+| **📄 Two-tier doc synthesis** | Sections the crawled official material doesn't cover are no longer left as placeholder text ("Not covered in referenced documentation"). A second, clearly-labelled pass fills them from the model's domain knowledge with a "⚠ General guidance — verify against the official documentation" caveat — a detailed-but-flagged section instead of an empty one |
+| **🧠 No-think coverage completed** | PR #8 wired 7 LLM call sites; three more were found and fixed: the pydantic_ai agents behind **Repo Chat** and **Curate**'s question engine (via `model_settings.extra_body`), and **Troubleshoot**'s native `/api/chat` call (`think: false`). All three also gained the `trust_env=False` proxy guard they were missing |
+| **🔍 Troubleshoot actually works** | Static analysis crashed on real modules (`.keys()` on the list python-hcl2 returns) and, past that, quoted declared-variable names made every `var.x` reference read as "undefined". Fixed via a shared `iter_labelled_blocks()` normaliser in `hcl_tools.py`; provider version-constraint checks also un-quote values so they actually fire. Troubleshoot's native `/api/chat` LLM call was also missing both the proxy guard and the thinking switch |
+| **💬 Repo Chat context sized to fit** | The query context (pretty-printed module summary + up to 8 code chunks) was unbounded — 15–25K chars into a 4096-token window meant multi-minute CPU prefill plus silent front-truncation. Now compact JSON, capped to the probed runtime budget, keeping the most relevant chunks. Also fixed pydantic_ai 1.x `result.data` deprecation |
+| **📚 Smarter not-covered detection** | Grounded synthesis sometimes wrote a paragraph *about* the material not covering a topic instead of the exact sentinel — those sections now correctly route to the labelled general-knowledge tier instead of shipping meta-commentary |
+| **🔌 APIs/roles never say "None documented"** | When the crawled material doesn't name the service's `*.googleapis.com` APIs or `roles/*` IAM roles (landing/pricing pages rarely do), a second pass fills them from model knowledge — every value still pattern-validated before use |
+
+---
+
+## v2.7.2
+
+| Change | Description |
+|---|---|
+| **🧠 Disable thinking mode** (`llm.disable_thinking`, default on) | For thinking models (qwen3 family, deepseek-r1): skip the reasoning trace on every LLM call. Beyond minutes of latency per call on CPU, reasoning traces were routed to `message.reasoning` and regularly exhausted `max_tokens` — so `message.content` came back **empty**. Verified: 16s/`'OK'` with the switch vs 60s+/empty without. Toggle in the Settings tab |
+| **⬇ Download documents** | New button in the Docs tab: save each previewed document as a styled standalone `.html` file — the offline alternative to Confluence publishing. No credentials, no second pipeline run |
+| **🔗 Terraform provider references** | Generated documents now include a "Terraform Provider References" section linking every resource *and data source* to its registry.terraform.io docs page and the provider's GitHub source doc. Data sources are now extracted from module HCL |
+| **🛠 GA validators fixed** | All four GA-workflow validators crashed (`AttributeError`) on every real module due to the python-hcl2 list shape; normalised and functionally tested |
+| **🏷 Extractor label quoting fixed** | Docgen metadata keys were literally `'"project_id"'` (quotes included); labels and version values now cleaned at source |
+
+---
+
 ## v2.7.1
 
 Found and fixed while validating v2.7 end-to-end against real cloned repos and a live Ollama instance:

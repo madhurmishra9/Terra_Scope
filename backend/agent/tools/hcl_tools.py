@@ -236,6 +236,25 @@ def _unquote(label: str) -> str:
     return label.strip().strip('"')
 
 
+def iter_labelled_blocks(parsed: dict, kind: str):
+    """Yield (label, body) for each top-level block of *kind*, normalising
+    python-hcl2's list-of-single-key-dicts shape and quoted labels. Shared
+    by every consumer of parse_hcl_content so the hcl2 shape quirks are
+    handled in exactly one place."""
+    blocks = parsed.get(kind, [])
+    if isinstance(blocks, dict):  # tolerate older parser shape
+        blocks = [blocks]
+    for entry in blocks:
+        if not isinstance(entry, dict):
+            continue
+        for label, body in entry.items():
+            if label == "__is_block__":
+                continue
+            if isinstance(body, list):
+                body = body[0] if body else {}
+            yield _unquote(label), body
+
+
 def _find_block_line(lines: list[str], block_type: str, *args) -> int:
     """Find the line number of an HCL block declaration."""
     for i, line in enumerate(lines, 1):

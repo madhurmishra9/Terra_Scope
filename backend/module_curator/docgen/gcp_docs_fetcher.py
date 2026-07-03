@@ -102,6 +102,48 @@ _GCP_DOC_SLUGS: dict[str, str] = {
 
 _PAGE_CAP = 15000          # chars of text kept per fetched page
 
+# Deterministic last-resort for "Required Google Cloud APIs": the primary
+# *.googleapis.com endpoint per doc-slug. These are stable, documented
+# identifiers — a curated fact table beats asking a small local model, which
+# can wrongly answer "None" (observed with qwen3.5:9b for Cloud Run).
+_KNOWN_SERVICE_APIS: dict[str, list[str]] = {
+    "bigquery":          ["bigquery.googleapis.com"],
+    "storage":           ["storage.googleapis.com"],
+    "dataflow":          ["dataflow.googleapis.com"],
+    "pubsub":            ["pubsub.googleapis.com"],
+    "sql":               ["sqladmin.googleapis.com"],
+    "spanner":           ["spanner.googleapis.com"],
+    "bigtable":          ["bigtableadmin.googleapis.com"],
+    "dataproc":          ["dataproc.googleapis.com"],
+    "composer":          ["composer.googleapis.com"],
+    "run":               ["run.googleapis.com"],
+    "kubernetes-engine": ["container.googleapis.com"],
+    "functions":         ["cloudfunctions.googleapis.com"],
+    "memorystore":       ["redis.googleapis.com"],
+    "vertex-ai":         ["aiplatform.googleapis.com"],
+    "artifact-registry": ["artifactregistry.googleapis.com"],
+    "secret-manager":    ["secretmanager.googleapis.com"],
+    "alloydb":           ["alloydb.googleapis.com"],
+    "datastream":        ["datastream.googleapis.com"],
+    "firestore":         ["firestore.googleapis.com"],
+    "filestore":         ["file.googleapis.com"],
+    "dns":               ["dns.googleapis.com"],
+    "tasks":             ["cloudtasks.googleapis.com"],
+    "scheduler":         ["cloudscheduler.googleapis.com"],
+    "build":             ["cloudbuild.googleapis.com"],
+    "compute":           ["compute.googleapis.com"],
+    "appengine":         ["appengine.googleapis.com"],
+    "monitoring":        ["monitoring.googleapis.com"],
+    "logging":           ["logging.googleapis.com"],
+    "trace":             ["cloudtrace.googleapis.com"],
+    "cdn":               ["compute.googleapis.com"],
+    "nat":               ["compute.googleapis.com"],
+    "armor":             ["compute.googleapis.com"],
+    "load-balancing":    ["compute.googleapis.com"],
+    "iam":               ["iam.googleapis.com"],
+    "kms":               ["cloudkms.googleapis.com"],
+}
+
 
 @dataclass
 class GCPDocsBundle:
@@ -235,6 +277,12 @@ async def fetch_gcp_docs(
         await _synthesise_sections(bundle, raw_material)
         if not bundle.apis_required or not bundle.common_roles:
             await _extract_apis_and_roles(bundle, raw_material)
+
+    # Deterministic last resort for the primary service API — curated facts,
+    # applied whenever both material extraction and model knowledge came up
+    # empty (small models can wrongly answer "None" for well-known services).
+    if not bundle.apis_required:
+        bundle.apis_required = list(_KNOWN_SERVICE_APIS.get(_slug(product_name).split("/")[0], []))
 
     _fallback_sections(bundle)
     return bundle
@@ -390,21 +438,68 @@ async def _ask(client, cfg, prompt: str) -> str:
     resp = await client.chat.completions.create(
         model=cfg.llm.model,
         messages=nothink_messages([{"role": "user", "content": prompt}]),
-            extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
+        extra_body=llm_extra_body(),  # disable thinking-mode traces (grounded app)
         temperature=0.0,
         max_tokens=cfg.llm.max_tokens,
     )
     return (resp.choices[0].message.content or "").strip()
 
 
+# Caveat appended to any section synthesised from model knowledge rather than
+# crawled official material — the doc stays honest about its grounding.
+_GENERAL_KNOWLEDGE_CAVEAT = "⚠ General guidance — verify against the official documentation links below."
+
+
+def _material_char_budget(cfg) -> int:
+    """Cap the grounding material so prompt + instruction fit the model's
+    ACTUAL runtime context window (probed from the live Ollama instance —
+    see llm_options.effective_context_tokens). Oversized prompts don't error
+    on Ollama — they get silently truncated from the front, cutting away the
+    reference material while keeping the trailing instruction, which then
+    reads as 'material doesn't cover this'."""
+    from backend.llm_options import grounding_char_budget
+    return grounding_char_budget(reserved_tokens=1500)
+
+
+def _parse_list(answer: str) -> list[str]:
+    items = [re.sub(r"^[-*•]\s*", "", ln).strip()
+             for ln in answer.splitlines() if ln.strip()]
+    return [i for i in items if len(i) > 3]
+
+
+# Grounded models don't always emit the sentinel verbatim — they write prose
+# ABOUT the material not covering the topic ("...are not covered in the
+# referenced documentation", "the provided material does not describe...").
+# Treat those as not-covered too, so tier 2 fills the section instead of the
+# doc shipping a paragraph of meta-commentary.
+_NOT_COVERED_RE = re.compile(
+    r"not covered in (the )?referenced documentation"
+    r"|(reference|provided|referenced) material (does not|doesn't|lacks)"
+    r"|documentation (does not|doesn't) (cover|describe|elaborate|specify)",
+    re.IGNORECASE,
+)
+
+
+def _is_not_covered(answer: str) -> bool:
+    return bool(_NOT_COVERED_RE.search(answer))
+
+
 async def _synthesise_sections(bundle: GCPDocsBundle, raw_material: str) -> None:
-    """One grounded LLM call per research section."""
+    """Two-tier synthesis per research section:
+
+    Tier 1 — grounded: answer ONLY from the crawled official material.
+    Tier 2 — for sections the material doesn't cover, ask the model from its
+             own domain knowledge and label the result with a caveat, instead
+             of leaving placeholder text. A detailed-but-flagged section is
+             more useful to a curator than 'Not covered in referenced
+             documentation'."""
     try:
         client, cfg = _make_llm_client()
     except Exception as e:
         print(f"[docgen-research] LLM client unavailable: {e}")
         return
 
+    budget = _material_char_budget(cfg)
     grounding = (
         "You are a senior cloud architect writing a pre-curation research "
         f"document for the Google Cloud product '{bundle.product_name}'. "
@@ -412,10 +507,11 @@ async def _synthesise_sections(bundle: GCPDocsBundle, raw_material: str) -> None
         "capabilities. If the material does not cover the request, reply "
         "exactly: Not covered in referenced documentation.\n\n"
         "=== REFERENCE MATERIAL ===\n"
-        f"{raw_material[:24000]}\n"
+        f"{raw_material[:budget]}\n"
         "=== END MATERIAL ===\n\n"
     )
 
+    uncovered: list[tuple[str, str, str]] = []
     try:
         for attr, kind, instruction in _SECTION_SPECS:
             if kind == "list":
@@ -425,28 +521,78 @@ async def _synthesise_sections(bundle: GCPDocsBundle, raw_material: str) -> None
                 fmt = "Return ONLY the prose paragraphs. No headers, no preamble."
             try:
                 answer = await _ask(client, cfg, grounding + instruction + "\n" + fmt)
-                if not answer or "not covered in referenced documentation" in answer.lower():
-                    print(f"[docgen-research] section '{attr}': not covered by material")
+                if not answer or _is_not_covered(answer):
+                    print(f"[docgen-research] section '{attr}': not covered by material — queued for tier 2")
+                    uncovered.append((attr, kind, instruction))
                     continue
                 if kind == "list":
-                    items = [re.sub(r"^[-*•]\s*", "", ln).strip()
-                             for ln in answer.splitlines() if ln.strip()]
-                    items = [i for i in items if len(i) > 3]
+                    items = _parse_list(answer)
                     if items:
                         setattr(bundle, attr, items)
+                    else:
+                        uncovered.append((attr, kind, instruction))
                 else:
                     setattr(bundle, attr, answer)
             except Exception as e:
                 print(f"[docgen-research] section '{attr}' failed: {e}")
+
+        # ── Tier 2: fill uncovered sections from model knowledge, labelled ──
+        for attr, kind, instruction in uncovered:
+            if kind == "list":
+                fmt = ("Return ONLY a plain list, one item per line, each line "
+                       "starting with '- '. No headers, no prose around it.")
+            else:
+                fmt = "Return ONLY the prose paragraphs. No headers, no preamble."
+            prompt = (
+                "You are a senior cloud architect with deep, current knowledge "
+                f"of the Google Cloud product '{bundle.product_name}'. Using your "
+                "own expert knowledge (official reference material was not "
+                "available for this topic), answer accurately and specifically. "
+                "Do not fabricate exact numbers you are unsure of — use ranges "
+                "or say 'varies by region/tier'.\n\n"
+                + instruction + "\n" + fmt
+            )
+            try:
+                answer = await _ask(client, cfg, prompt)
+                if not answer or len(answer.strip()) < 20:
+                    continue
+                if kind == "list":
+                    items = _parse_list(answer)
+                    if items:
+                        setattr(bundle, attr, items + [_GENERAL_KNOWLEDGE_CAVEAT])
+                        print(f"[docgen-research] section '{attr}': filled from general knowledge (labelled)")
+                else:
+                    setattr(bundle, attr, f"{answer}\n\n{_GENERAL_KNOWLEDGE_CAVEAT}")
+                    print(f"[docgen-research] section '{attr}': filled from general knowledge (labelled)")
+            except Exception as e:
+                print(f"[docgen-research] tier-2 section '{attr}' failed: {e}")
     finally:
         await client.close()
 
 
+def _apply_apis_roles_answer(bundle: GCPDocsBundle, answer: str) -> None:
+    for line in answer.splitlines():
+        low = line.lower().strip()
+        if low.startswith("apis:") and "unknown" not in low and not bundle.apis_required:
+            bundle.apis_required = [a.strip() for a in line.split(":", 1)[1].split(",")
+                                    if "googleapis.com" in a]
+        elif low.startswith("roles:") and "unknown" not in low and not bundle.common_roles:
+            bundle.common_roles = [r.strip() for r in line.split(":", 1)[1].split(",")
+                                   if r.strip().startswith("roles/")]
+
+
 async def _extract_apis_and_roles(bundle: GCPDocsBundle, raw_material: str) -> None:
-    """For products missing from config: extract APIs and IAM roles via LLM."""
+    """For products missing from config: extract APIs and IAM roles via LLM.
+
+    Two tiers, like the section synthesis: extract from the crawled material
+    first; if it doesn't name them (landing/pricing pages rarely do), fall
+    back to the model's own knowledge — service API endpoints and predefined
+    role names are stable, well-known identifiers, and every generated value
+    is verifiable (it must match *.googleapis.com / roles/* to be kept)."""
     client = None
     try:
         client, cfg = _make_llm_client()
+        budget = min(12000, _material_char_budget(cfg))
         prompt = (
             f"From the reference material about Google Cloud '{bundle.product_name}' "
             "below, extract:\n"
@@ -456,17 +602,23 @@ async def _extract_apis_and_roles(bundle: GCPDocsBundle, raw_material: str) -> N
             "APIS: api1.googleapis.com, api2.googleapis.com\n"
             "ROLES: roles/x.admin, roles/x.viewer\n"
             "If unknown from the material, write 'unknown' after the colon.\n\n"
-            f"=== MATERIAL ===\n{raw_material[:12000]}\n=== END ==="
+            f"=== MATERIAL ===\n{raw_material[:budget]}\n=== END ==="
         )
         answer = await _ask(client, cfg, prompt)
-        for line in answer.splitlines():
-            low = line.lower().strip()
-            if low.startswith("apis:") and "unknown" not in low and not bundle.apis_required:
-                bundle.apis_required = [a.strip() for a in line.split(":", 1)[1].split(",")
-                                        if "googleapis.com" in a]
-            elif low.startswith("roles:") and "unknown" not in low and not bundle.common_roles:
-                bundle.common_roles = [r.strip() for r in line.split(":", 1)[1].split(",")
-                                       if r.strip().startswith("roles/")]
+        _apply_apis_roles_answer(bundle, answer)
+
+        if not bundle.apis_required or not bundle.common_roles:
+            fallback_prompt = (
+                f"For the Google Cloud product '{bundle.product_name}', from your "
+                "own knowledge, list:\n"
+                "APIS: the *.googleapis.com API endpoints that must be enabled to use it\n"
+                "ROLES: the most common predefined roles/* IAM roles for it\n"
+                "Return exactly two lines in this format:\n"
+                "APIS: api1.googleapis.com, api2.googleapis.com\n"
+                "ROLES: roles/x.admin, roles/x.viewer"
+            )
+            answer = await _ask(client, cfg, fallback_prompt)
+            _apply_apis_roles_answer(bundle, answer)
     except Exception as e:
         print(f"[docgen-research] API/role extraction failed: {e}")
     finally:
