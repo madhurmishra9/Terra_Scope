@@ -493,16 +493,33 @@ def _build_code_context(file_contents: dict[str, str], max_chars: int = 6000) ->
 def _summarize_for_prompt(summary: dict) -> str:
     if not summary:
         return "(no summary available)"
-    resources = summary.get("resource_types", [])
-    req_vars  = [v.get("name", "") for v in summary.get("required_variables", [])]
-    provider  = summary.get("provider", {})
+    # summarize_module() uses key "google_resource_types" and returns
+    # required_variables as plain strings — the previous dict assumptions
+    # ("resource_types", v.get("name")) crashed the whole endpoint with
+    # 'str' object has no attribute 'get' (masked until the static-analysis
+    # stage stopped crashing first).
+    resources = summary.get("google_resource_types") or summary.get("resource_types") or []
+    req_vars = [
+        v.get("name", "") if isinstance(v, dict) else str(v)
+        for v in summary.get("required_variables", [])
+    ]
+    prov_reqs = summary.get("provider_requirements") or {}
     lines = []
     if resources:
-        lines.append(f"Resources: {', '.join(resources)}")
+        lines.append(f"Resources: {', '.join(resources[:30])}")
     if req_vars:
-        lines.append(f"Required variables: {', '.join(req_vars)}")
-    if provider:
-        lines.append(f"Provider: {provider.get('name', '')} {provider.get('version_constraint', '')}")
+        lines.append(f"Required variables: {', '.join(v for v in req_vars if v)}")
+    if isinstance(prov_reqs, dict) and prov_reqs.get("required_providers"):
+        provs = prov_reqs["required_providers"]
+        if isinstance(provs, dict):
+            frags = []
+            for pname, pcfg in provs.items():
+                if pname == "__is_block__" or not isinstance(pcfg, dict):
+                    continue
+                ver = str(pcfg.get("version", "")).strip().strip('"')
+                frags.append(f"{pname} {ver}".strip())
+            if frags:
+                lines.append(f"Providers: {', '.join(frags)}")
     return "\n".join(lines) if lines else "(empty module)"
 
 
