@@ -8,9 +8,9 @@
 
 ---
 
-## 🚀 GA Release Workflow (v2.3 — Multi-Cloud)
+## 🚀 GA Release Workflow (Multi-Cloud)
 
-TerraScope includes a full **GA Release Workflow** that automates upgrading your Terraform modules to the latest provider GA release. In v2.3 it supports **GCP, AWS, and Azure** — the provider is auto-detected from each repo's `versions.tf`, with no configuration changes required.
+TerraScope includes a full **GA Release Workflow** that automates upgrading your Terraform modules to the latest provider GA release. It supports **GCP, AWS, and Azure** — the provider is auto-detected from each repo's `versions.tf`, with no configuration changes required.
 
 | Capability | Description |
 |-----------|-------------|
@@ -86,7 +86,7 @@ The workflow persists applied changes to `./data/ga_state/{repo_name}.json`. On 
     - [Mode 2: From Document](#102-mode-2-from-document)
     - [Mode 3: From Module](#103-mode-3-from-module)
     - [Mode 4: Self-Curation](#104-mode-4-self-curation)
-11. [Confluence Documentation Generator](#11-confluence-documentation-generator)
+11. [Documentation Generator](#11-documentation-generator)
     - [How It Works](#111-how-it-works)
     - [Template Setup](#112-template-setup)
     - [Running Docgen](#113-running-docgen)
@@ -112,7 +112,7 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 - Answers natural-language questions: variables, resources, IAM, diffs, issues.
 - Matches errors against a GCP-specific knowledge base.
 
-### Generate (Curate View — New in v2.0)
+### Generate (Curate View)
 - Generates complete Terraform modules from a service name, uploaded document, or existing module.
 - Asks LLM-driven clarifying questions before generating.
 - Fetches provider documentation from the Terraform Registry (cached locally for offline use).
@@ -120,7 +120,7 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 - Writes output to `./output/{service}_{timestamp}/` and displays it in-browser for copy-paste.
 - Supports GCP, AWS, and Azure.
 
-### Troubleshoot (New in v2.3)
+### Troubleshoot
 - Analyses any module at any Git tag for logical and syntactic bugs — no `terraform init` or plan needed.
 - Three-stage pipeline: static analysis → LLM review → version recommendation.
 - Detects: undefined variable references, security misconfigurations, deprecated resources, type mismatches, missing provider constraints, anti-patterns.
@@ -177,7 +177,7 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 │                                 │                   │                    │ │
 │                                 │  ┌────────────────▼─────────────────┐  │ │
 │                                 │  │  Ollama   :11434                  │  │ │
-│                                 │  │  LLM: qwen2.5-coder:7b                   │  │ │
+│                                 │  │  LLM: local Ollama model                 │  │ │
 │                                 │  │  Embeddings: nomic-embed-text     │  │ │
 │                                 │  └──────────────────────────────────┘  │ │
 │                                 │                                        │ │
@@ -199,7 +199,7 @@ TerraScope is a local AI tool for Terraform module curation teams. It covers two
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │  Generated Output (new in v2.0)                                       │  │
+│  │  Generated Output                                                 │  │
 │  │  ./output/cloud_run_20250509_143022/main.tf                           │  │
 │  │  ./output/cloud_run_20250509_143022/variables.tf   ...               │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
@@ -243,7 +243,7 @@ Download and run from [ollama.com/download](https://ollama.com/download). Ollama
 **Step 2 — Pull models**
 
 ```powershell
-ollama pull qwen2.5-coder:7b          # LLM (~2.5 GB)
+ollama pull qwen3.5:9b                # LLM (~6.5 GB); lighter: qwen2.5-coder:7b (~2.5 GB)
 ollama pull nomic-embed-text   # Embeddings (~274 MB)
 ollama list                    # Verify both appear
 ```
@@ -301,7 +301,7 @@ brew services start ollama
 brew install python@3.12 node
 
 # Pull models
-ollama pull qwen2.5-coder:7b
+ollama pull qwen3.5:9b
 ollama pull nomic-embed-text
 
 # Clone TerraScope
@@ -351,12 +351,19 @@ terrascope:
   llm:
     provider: ollama
     base_url: http://localhost:11434
-    model: qwen2.5-coder:7b              # Change to gemma3:12b for better quality (needs 8 GB RAM)
+    model: qwen3.5:9b             # Any Ollama chat model; qwen2.5-coder:7b is a lighter non-thinking alternative
     embedding_model: nomic-embed-text
     temperature: 0.0              # Keep at 0.0 for deterministic, fact-only answers
     max_tokens: 2048
-    context_window: 8192          # Used as max output for code generation
+    context_window: 8192          # Fallback only — the REAL window is probed from the running
+                                  # Ollama instance (/api/ps) and grounding material is sized to fit
+    disable_thinking: true        # For thinking models (qwen3 family, deepseek-r1): skip reasoning
+                                  # traces. Every TerraScope prompt is grounded, so thinking only adds
+                                  # minutes of CPU latency — and can exhaust max_tokens, returning
+                                  # empty answers. Leave on unless you specifically want traces.
 ```
+
+> **Thinking models:** TerraScope disables the reasoning phase three ways at once (`reasoning_effort: "none"`, `think: false`, and the qwen3 `/no_think` soft switch), so thinking-capable models answer directly. Toggle from the **Settings tab** or here.
 
 ### Anti-Hallucination Settings
 
@@ -424,7 +431,7 @@ terrascope/
 ├── .env                                ← Your credentials (git-ignored)
 ├── requirements.txt
 │
-├── templates/                          ← Docgen reference templates (NEW v2.4)
+├── templates/                          ← Docgen reference templates
 │   └── example/
 │       └── field_map.yaml              ← Token → metadata mapping (copy per product)
 │
@@ -459,7 +466,7 @@ terrascope/
 │   │   ├── module_fetcher.py           ← GitHub clone / local dir / ZIP / .tf upload
 │   │   ├── local_repo_scanner.py       ← Scans ./repos/ for local Terraform modules (no ChromaDB needed)
 │   │   ├── dependency_resolver.py      ← Recursively resolves module {} sources (local → repos → ChromaDB → registry)
-│   │   └── docgen/                     ← Confluence doc generator (NEW v2.4)
+│   │   └── docgen/                     ← Confluence doc generator
 │   │       ├── config.py               ← .env → ConfluenceSettings (fail-fast validation)
 │   │       ├── ir.py                   ← DocumentIR + 5 node types (the pipeline contract)
 │   │       ├── manifest.py             ← Idempotency store (data/docgen_manifest.json)
@@ -477,7 +484,7 @@ terrascope/
 │   │           ├── client.py           ← httpx REST client (create/update page, attachments)
 │   │           └── space.py            ← resolve or create private (~) space
 │   │
-│   ├── ga_workflow/                    ← GA Release automation (v2.3 multi-cloud)
+│   ├── ga_workflow/                    ← GA Release automation (multi-cloud)
 │   │   ├── ga_models.py                ← Pydantic models (CloudProvider, BreakingReason, IncrementalState)
 │   │   ├── ga_detector.py              ← Multi-cloud provider detection + changelog parsing
 │   │   ├── cloud_service_scanner.py    ← AWS What's New + Azure Updates + GCP release note feeds
@@ -485,7 +492,7 @@ terrascope/
 │   │   ├── ga_orchestrator.py          ← 7-stage pipeline + incremental state tracking
 │   │   └── ga_router.py                ← FastAPI endpoints for GA workflow
 │   │
-│   └── troubleshooter/                 ← Module bug detection + version recommendation (NEW v2.3)
+│   └── troubleshooter/                 ← Module bug detection + version recommendation
 │       ├── models.py                   ← TroubleshootIssue, VersionRecommendation, TroubleshootResult
 │       └── troubleshooter.py           ← Static analysis · LLM review · changelog-based version suggestion
 │
@@ -548,7 +555,7 @@ Indexing is **incremental** — already-indexed tags are skipped. You can also c
 
 ## 8. Running TerraScope
 
-### ⚡ Single command (recommended — v2.5+)
+### ⚡ Single command (recommended)
 
 ```bash
 cd frontend
@@ -593,7 +600,7 @@ cd frontend && TERRASCOPE_NO_BACKEND=1 npm run dev
 curl http://localhost:8000/api/health
 ```
 ```json
-{ "status": "ok", "ollama": "running", "model": "qwen2.5-coder:7b", "repos_configured": 3, "grounding_mode": "strict" }
+{ "status": "ok", "ollama": "running", "model": "qwen3.5:9b", "repos_configured": 3, "grounding_mode": "strict" }
 ```
 
 ---
@@ -603,10 +610,10 @@ curl http://localhost:8000/api/health
 The top bar has **eight views** (hover any tab for a description):
 
 ```
-🔭 TerraScope v2.5  [🌐 Ask AI] [💬 Repo Chat] [🔧 Curate] [📄 Docs] [🚀 GA Workflow] [🧪 Scenarios] [🔍 Troubleshoot] [⚙ Settings]
+🔭 TerraScope  [🌐 Ask AI] [💬 Repo Chat] [🔧 Curate] [📄 Docs] [🚀 GA Workflow] [🧪 Scenarios] [🔍 Troubleshoot] [⚙ Settings]
 ```
 
-### 9.0 Ask AI — General Chat *(v2.5, default tab)*
+### 9.0 Ask AI — General Chat *(default tab)*
 
 Ask **anything** — no repo or tag selection needed:
 
@@ -641,7 +648,7 @@ After clicking Start, the right panel enters **Q&A mode** — the LLM asks up to
 
 Generated files appear in a **tabbed code viewer** with per-file Copy buttons. The output directory path is shown at the top.
 
-### 9.3 Docs — Documentation Generator *(v2.5)*
+### 9.3 Docs — Documentation Generator
 
 A dedicated panel for generating Google-doc-enriched Confluence pages for **any product**, curated or not.
 
@@ -652,11 +659,18 @@ A dedicated panel for generating Google-doc-enriched Confluence pages for **any 
 - **Fetch Google official docs** — toggle: pulls product overview, features and security notes from `cloud.google.com` + Terraform registry; synthesises with local LLM
 - **Document Types** — checkboxes for HLD, CPSD, Architectural Design, Highly Confidential Assessment
 
-**Two-phase flow:**
+**Three ways out:**
 1. **① Generate Preview (local)** — renders each document in a white-page HTML view; no Confluence calls
-2. **② Publish to Confluence** — enabled only after a successful preview and only when Confluence is configured; returns clickable page URLs per doc type
+2. **⬇ Download Documents (.html)** — saves each previewed document as a styled standalone `.html` file; the offline alternative when you don't use Confluence (no credentials, no second pipeline run)
+3. **② Publish to Confluence** — enabled only after a successful preview and only when Confluence is configured; returns clickable page URLs per doc type
 
 A direct link to the Settings tab appears when Confluence is not yet configured.
+
+**How sections get filled (two-tier synthesis):**
+- Sections covered by the crawled official documentation are synthesised **grounded** — answers come only from that material, with source URLs listed at the bottom of the doc.
+- Sections the material genuinely doesn't cover (landing/pricing pages rarely explain IAM design or quotas) are filled from the model's domain knowledge and clearly marked with `⚠ General guidance — verify against the official documentation links below` — a detailed, flagged section instead of placeholder text.
+- Required Google Cloud APIs resolve through a precedence chain: config metadata → crawled material → model knowledge → a curated fact table of well-known `*.googleapis.com` endpoints. Unknown products get an empty list, never a fabricated one.
+- When a **Module Path** is provided, the doc also includes a **Terraform Provider References** section linking every resource and data source to its `registry.terraform.io` docs page and the provider's GitHub source doc.
 
 ### 9.4 GA Workflow
 
@@ -920,7 +934,7 @@ A: Follow existing snake_case, add lifecycle_enabled boolean alongside the rules
 
 ---
 
-### 10.5 Accuracy Pipeline — Schema Grounding, Modular Layout & Repair *(v2.6)*
+### 10.5 Accuracy Pipeline — Schema Grounding, Modular Layout & Repair
 
 Every generation now runs through an accuracy pipeline that grounds the model in the real provider schema, enforces a deterministic file layout, and repairs validation errors before returning the module.
 
@@ -959,7 +973,7 @@ Q&A + registry docs
 
 > All stages degrade gracefully: if the schema, `terraform`, `tflint`, or `checkov` are unavailable, or a repair pass produces nothing usable, the pipeline falls back to the previous behaviour rather than failing the generation.
 
-### 10.6 Verified Diagrams & Doc Guards *(v2.7)*
+### 10.6 Verified Diagrams & Doc Guards
 
 Documentation generation (§11) now shares the same "verified, not just generated" philosophy as code generation:
 
@@ -980,11 +994,11 @@ python -m backend.tools.render_diagrams README.md --from-readme -d assets --back
 
 ---
 
-## 11. Confluence Documentation Generator *(v2.5)*
+## 11. Documentation Generator
 
-TerraScope generates a full documentation set — **HLD**, **CPSD**, **Architectural Design**, and **Highly Confidential Assessment** — for **any product**, curated or not. v2.5 adds Google official-docs enrichment, a rich built-in template, and a two-phase local-preview → Confluence-publish flow.
+TerraScope generates a full documentation set — **HLD**, **CPSD**, **Architectural Design**, and **Highly Confidential Assessment** — for **any product**, curated or not: Google official-docs enrichment via a bounded crawler, two-tier grounded/labelled synthesis, a rich built-in template, and a local-preview → download-or-publish flow.
 
-### 11.1 How It Works (v2.5 pipeline)
+### 11.1 How It Works
 
 ```
 Product name (+ optional module path)
@@ -1004,7 +1018,7 @@ Product name (+ optional module path)
         │                    (OR use rich built-in default when no .docx exists)
         ▼
   template/fields.py         bind all {{ tokens }} from field_map.yaml
-        │                    → real HTML tables for inputs/outputs (v2.5 fix)
+        │                    → real HTML tables for inputs/outputs
         ▼
   render/storage_format.py   IR → Confluence storage-format XHTML
         │                    (pipe-delimited field values → real <table> elements)
@@ -1015,7 +1029,7 @@ Product name (+ optional module path)
   manifest.py                persist page IDs → idempotent re-runs update in place
 ```
 
-### 11.2 Available Template Tokens (v2.5 — complete list)
+### 11.2 Available Template Tokens (complete list)
 
 | Token | Source | Format |
 |-------|--------|--------|
@@ -1209,7 +1223,7 @@ All endpoints at `http://localhost:8000`.
 {
   "status": "ok",
   "ollama": "running",
-  "model": "qwen2.5-coder:7b",
+  "model": "qwen3.5:9b",
   "repos_configured": 3,
   "grounding_mode": "strict",
   "network_available": true
@@ -1244,7 +1258,7 @@ Returns per-repo indexing status (chunks, tags, status).
 
 ---
 
-### Curation Endpoints (New in v2.0)
+### Curation Endpoints
 
 #### `POST /api/curate/start`
 
@@ -1356,7 +1370,7 @@ Returns `SessionView` with `result` populated:
 
 ---
 
-### Docgen Endpoints (New in v2.4)
+### Docgen Endpoints
 
 #### `GET /api/docgen/config`
 
@@ -1422,7 +1436,7 @@ When `dry_run` is `true`, each page result contains `dry_run_path` instead of `p
 
 ---
 
-### Registry Endpoints (New in v2.0)
+### Registry Endpoints
 
 #### `GET /api/registry/status`
 ```json
@@ -1444,7 +1458,7 @@ Response:
 
 ---
 
-### Troubleshoot Endpoint (New in v2.3)
+### Troubleshoot Endpoint
 
 #### `POST /api/troubleshoot`
 
@@ -1514,7 +1528,7 @@ Response:
 
 ---
 
-### GA Workflow Endpoints (New in v2.3)
+### GA Workflow Endpoints
 
 #### `GET /api/ga/detect/{repo_name}`
 
@@ -1748,9 +1762,9 @@ More context = slower prompt processing on CPU, but substantially richer grounde
 
 ### Model not found during curation
 ```
-Error code: 404 - {'error': {'message': "model 'qwen2.5-coder:7b' not found"}}
+Error code: 404 - {'error': {'message': "model 'qwen3.5:9b' not found"}}
 ```
-Run `ollama pull qwen2.5-coder:7b` and wait for the download to complete.
+Run `ollama pull <model from terrascope.config.yaml>` (e.g. `ollama pull qwen3.5:9b`) and wait for the download to complete.
 
 ### PDF extraction returns blank
 `pdfplumber` works on text-based PDFs. Scanned documents need OCR pre-processing (not included). Convert to text or DOCX first.

@@ -3168,7 +3168,7 @@ export default function TerraScope() {
             display:"flex", alignItems:"center", justifyContent:"center", fontSize:12 }}>🔭</div>
           <span style={{ fontWeight:700, fontSize:14, color:"#E6EDF3" }}>TerraScope</span>
           <span style={{ fontSize:10, color:"#484F58", padding:"1px 5px",
-            background:"#21262D", borderRadius:3 }}>v2.3</span>
+            background:"#21262D", borderRadius:3 }}>v2.8</span>
         </div>
 
         {/* View toggle */}
